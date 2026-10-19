@@ -959,6 +959,10 @@ export interface WsCanvasCallFrame {
   mountSeq: number
   method: string
   params: string
+  /** How long the host still waits for the reply, in ms. A call still
+   * queued for a loading editor when it runs out is answered
+   * `CANVAS_TIMEOUT` and never runs. Absent on a notice. */
+  timeoutMs?: number
 }
 
 /** `canvas_mount` reply. A refused report carries `heldElsewhere`: another

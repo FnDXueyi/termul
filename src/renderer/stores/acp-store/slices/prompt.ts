@@ -56,6 +56,7 @@ import {
 import { useAcpStore } from '../index'
 import {
   activeWirePromptTurns,
+  bugReportCollectors,
   claimPromptTurnEnd,
   commitMessageCollectors,
   echoedWirePromptTurns,
@@ -65,6 +66,7 @@ import {
   PROMOTE_SLOW_WARNING_MS,
   persistComposerOptions,
   persistSession,
+  rejectBugReportCollector,
   rejectCommitMessageCollector,
   rejectTerminalAssistCollector,
   terminalAssistCollectors
@@ -1023,9 +1025,11 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     }
     const hadCommit = commitMessageCollectors.has(e.sessionId)
     const hadAssist = terminalAssistCollectors.has(e.sessionId)
+    const hadBugReport = bugReportCollectors.has(e.sessionId)
     if (hadCommit) rejectCommitMessageCollector(e.sessionId, 'The ACP agent requested permission')
     if (hadAssist) rejectTerminalAssistCollector(e.sessionId, 'The ACP agent requested permission')
-    if (hadCommit || hadAssist) return
+    if (hadBugReport) rejectBugReportCollector(e.sessionId, 'The ACP agent requested permission')
+    if (hadCommit || hadAssist || hadBugReport) return
     // Render clocks: an approval/question never waits on a flush clock, and the
     // buffered tool call / text it refers to lands first (never after the modal).
     flushCoalescedSync()
@@ -1078,13 +1082,17 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     if (e.sessionId && isHistoryCoveredEvent(e.sessionId, eventSeq)) return
     const hadCommit = Boolean(e.sessionId) && commitMessageCollectors.has(e.sessionId)
     const hadAssist = Boolean(e.sessionId) && terminalAssistCollectors.has(e.sessionId)
+    const hadBugReport = Boolean(e.sessionId) && bugReportCollectors.has(e.sessionId)
     if (hadCommit) {
       rejectCommitMessageCollector(e.sessionId, 'The ACP agent requested more information')
     }
     if (hadAssist) {
       rejectTerminalAssistCollector(e.sessionId, 'The ACP agent requested more information')
     }
-    if (hadCommit || hadAssist) return
+    if (hadBugReport) {
+      rejectBugReportCollector(e.sessionId, 'The ACP agent requested more information')
+    }
+    if (hadCommit || hadAssist || hadBugReport) return
     // Render clocks: an approval/question never waits on a flush clock, and the
     // buffered tool call / text it refers to lands first (never after the modal).
     flushCoalescedSync()
@@ -1123,11 +1131,14 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     if (isHistoryCoveredEvent(e.sessionId, eventSeq)) return
     const hadCommit = commitMessageCollectors.has(e.sessionId)
     const hadAssist = terminalAssistCollectors.has(e.sessionId)
+    const hadBugReport = bugReportCollectors.has(e.sessionId)
     if (hadCommit)
       rejectCommitMessageCollector(e.sessionId, 'The ACP agent asked an interactive question')
     if (hadAssist)
       rejectTerminalAssistCollector(e.sessionId, 'The ACP agent asked an interactive question')
-    if (hadCommit || hadAssist) return
+    if (hadBugReport)
+      rejectBugReportCollector(e.sessionId, 'The ACP agent asked an interactive question')
+    if (hadCommit || hadAssist || hadBugReport) return
     // Render clocks: an approval/question never waits on a flush clock, and the
     // buffered tool call / text it refers to lands first (never after the modal).
     flushCoalescedSync()
@@ -1189,6 +1200,11 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     const assistCollector = terminalAssistCollectors.get(e.sessionId)
     if (assistCollector) {
       assistCollector.complete(e.stopReason)
+      return
+    }
+    const bugReportCollector = bugReportCollectors.get(e.sessionId)
+    if (bugReportCollector) {
+      bugReportCollector.complete(e.stopReason)
       return
     }
     // Flush any coalesced streaming updates so the final transcript is

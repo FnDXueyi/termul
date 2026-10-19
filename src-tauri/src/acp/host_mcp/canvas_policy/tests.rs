@@ -59,18 +59,21 @@ fn save_is_the_host_save_whatever_path_it_names() {
     }
 }
 
+fn export_to(command: &str, params: Value) -> (String, Value) {
+    let CanvasRoute::ExportTo { path, execute } =
+        route("engine.execute", &execute(command, params))
+    else {
+        panic!("{command} with a path is written by Termul");
+    };
+    (path, execute)
+}
+
 #[test]
 fn an_export_with_a_path_runs_without_it_and_keeps_its_options() {
-    for command in ["file.export", "file.exportSvg", "file.exportFramesPdf"] {
+    for command in ["file.exportSvg", "file.exportFramesPdf"] {
         let params =
             json!({"path": "out/a.pdf", "ids": [18_446_744_073_709_551_615u64], "cmyk": true});
-        let CanvasRoute::ExportTo {
-            path,
-            execute: stripped,
-        } = route("engine.execute", &execute(command, params))
-        else {
-            panic!("{command} with a path is written by Termul");
-        };
+        let (path, stripped) = export_to(command, params);
         assert_eq!(path, "out/a.pdf");
         assert_eq!(
             stripped,
@@ -78,6 +81,59 @@ fn an_export_with_a_path_runs_without_it_and_keeps_its_options() {
                 command,
                 json!({"ids": [18_446_744_073_709_551_615u64], "cmyk": true})
             )
+        );
+    }
+    let (path, stripped) = export_to(
+        "file.export",
+        json!({"path": "out/a.pdf", "ids": [18_446_744_073_709_551_615u64], "cmyk": true}),
+    );
+    assert_eq!(path, "out/a.pdf");
+    assert_eq!(
+        stripped,
+        execute(
+            "file.export",
+            json!({"ids": [18_446_744_073_709_551_615u64], "cmyk": true, "format": "pdf"})
+        ),
+        "the format the path's extension named, which the editor no longer sees"
+    );
+}
+
+#[test]
+fn an_export_without_a_format_takes_it_from_the_paths_extension() {
+    for (requested, format) in [
+        ("assets/logo.svg", "svg"),
+        ("out/deck.PDF", "pdf"),
+        ("hero.jpeg", "jpg"),
+        ("hero.jpg", "jpg"),
+        ("thumb.webp", "webp"),
+        ("shot.png", "png"),
+        ("design.fig", "fig"),
+    ] {
+        let (_, stripped) = export_to("file.export", json!({"path": requested}));
+        assert_eq!(stripped["params"], json!({"format": format}), "{requested}");
+    }
+    let (_, stripped) = export_to("file.export", json!({"path": "a.png", "format": "svg"}));
+    assert_eq!(
+        stripped["params"],
+        json!({"format": "svg"}),
+        "an explicit format stands"
+    );
+}
+
+#[test]
+fn an_export_path_with_no_known_extension_and_no_format_is_refused() {
+    for requested in ["notes.txt", "out/logo", "archive.tar.gz"] {
+        let route = route(
+            "engine.execute",
+            &execute("file.export", json!({"path": requested})),
+        );
+        let CanvasRoute::Refuse(error) = route else {
+            panic!("{requested}: the format cannot be told");
+        };
+        assert!(
+            error.message.contains("format"),
+            "{requested}: {}",
+            error.message
         );
     }
 }
@@ -325,4 +381,86 @@ fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result
             Err(std::io::Error::other("mklink /J failed"))
         }
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn an_export_write_holds_its_folders_so_none_can_be_swapped_for_a_link() {
+    let project = Project::new();
+    let root = std::fs::canonicalize(project.root()).unwrap();
+    let written = write_project_file(&project.root(), "assets/icons/a.png", b"png").unwrap();
+    assert_eq!(std::fs::read(&written.absolute).unwrap(), b"png");
+
+    let held = hold_real_folders(&root, &root.join("assets").join("icons")).unwrap();
+    assert!(
+        std::fs::rename(root.join("assets"), root.join("moved")).is_err(),
+        "a held folder cannot be moved aside for a link"
+    );
+    drop(held);
+    std::fs::rename(root.join("assets"), root.join("moved")).unwrap();
+
+    let outside = project.0.join("outside");
+    std::fs::create_dir_all(outside.join("icons")).unwrap();
+    if let Err(error) = link_dir(&outside, &root.join("assets")) {
+        eprintln!("skipped: this machine cannot create a directory link ({error})");
+        return;
+    }
+    assert!(
+        hold_real_folders(&root, &root.join("assets").join("icons")).is_err(),
+        "a folder swapped for a link since the check is refused"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_export_write_refuses_a_folder_that_is_a_link() {
+    let project = Project::new();
+    let root = std::fs::canonicalize(project.root()).unwrap();
+    let written = write_project_file(&project.root(), "assets/icons/a.png", b"png").unwrap();
+    assert_eq!(std::fs::read(&written.absolute).unwrap(), b"png");
+    write_project_file(&project.root(), "assets/icons/a.png", b"png2").unwrap();
+    assert_eq!(std::fs::read(&written.absolute).unwrap(), b"png2");
+
+    std::fs::rename(root.join("assets"), root.join("moved")).unwrap();
+    let outside = project.0.join("outside");
+    std::fs::create_dir_all(outside.join("icons")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("assets")).unwrap();
+    assert!(
+        write_in_real_folder(
+            &root,
+            &root.join("assets").join("icons"),
+            "a.png".as_ref(),
+            b"escaped"
+        )
+        .is_err(),
+        "a folder swapped for a link since the check is refused"
+    );
+    assert!(!outside.join("icons").join("a.png").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_export_write_lands_in_the_folder_it_opened_even_if_it_moves() {
+    let project = Project::new();
+    let root = std::fs::canonicalize(project.root()).unwrap();
+    std::fs::create_dir_all(root.join("assets").join("icons")).unwrap();
+    let folder = open_real_folder(&root, &root.join("assets").join("icons")).unwrap();
+
+    std::fs::rename(root.join("assets"), root.join("moved")).unwrap();
+    let outside = project.0.join("outside");
+    std::fs::create_dir_all(outside.join("icons")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("assets")).unwrap();
+
+    use std::os::fd::AsFd;
+    crate::acp::atomic_file::replace_at(folder.as_fd(), "a.png".as_ref(), b"png").unwrap();
+    assert_eq!(
+        std::fs::read(root.join("moved").join("icons").join("a.png")).unwrap(),
+        b"png"
+    );
+    assert!(!outside.join("icons").join("a.png").exists());
+    let leftovers: Vec<_> = std::fs::read_dir(root.join("moved").join("icons"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(leftovers, ["a.png"]);
 }

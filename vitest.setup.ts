@@ -88,7 +88,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
   readText: vi.fn(),
   writeText: vi.fn(),
-  readImage: vi.fn()
+  readImage: vi.fn(),
+  writeImage: vi.fn()
 }))
 
 vi.mock('@tauri-apps/plugin-store', () => ({

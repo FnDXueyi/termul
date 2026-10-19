@@ -111,8 +111,9 @@ async fn the_wire_frame_has_the_canvas_call_shape() {
     let call =
         tokio::spawn(async move { caller.call("proj-1", "engine.commands", "{}".into()).await });
     let frame = renderer.received(1).await.remove(0);
+    let wire = serde_json::to_value(&frame).unwrap();
     assert_eq!(
-        serde_json::to_value(&frame).unwrap(),
+        wire,
         serde_json::json!({
             "type": "canvas_call",
             "callId": frame.call_id,
@@ -120,7 +121,15 @@ async fn the_wire_frame_has_the_canvas_call_shape() {
             "mountSeq": 1,
             "method": "engine.commands",
             "params": "{}",
+            "timeoutMs": wire["timeoutMs"],
         })
+    );
+    let left = wire["timeoutMs"]
+        .as_u64()
+        .expect("the call carries its time left");
+    assert!(
+        left > 0 && left <= 10_000,
+        "the host's own remaining wait: {left}"
     );
     router.reply("conn-a", frame.call_id, 1, Ok("[]".into()));
     assert_eq!(call.await.unwrap(), Ok("[]".to_string()));

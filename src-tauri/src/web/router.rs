@@ -25,10 +25,12 @@ use crate::web::acp_api;
 use crate::web::auth::{BearerVerified, WebAuth};
 
 use crate::acp::{AcpCatalogService, AcpInstallService, AcpManager};
+
 use crate::pty::PtyManager;
 use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
 use crate::web::catalog_api;
 use crate::web::connection_runtime::ConnectionRuntime;
+use crate::web::diagnostics_api;
 use crate::web::fs_api;
 use crate::web::git_api;
 use crate::web::git_diff_stat_api;
@@ -280,6 +282,12 @@ pub fn router(
         .route("/skills/{name}", get(skills_api::read))
         // Frontend error forwarding (CAP-2): `POST /log/frontend-error`.
         .route("/log/frontend-error", log_api::route())
+        // Bug-report diagnostics + host-side `gh` submit
+        // (spec-bug-report-dialog). Mirrors the
+        // `collect_bug_report_context` / `submit_bug_report` commands; both
+        // are guarded mutations (`check_local_only` in the handlers).
+        .route("/log/diagnostics", diagnostics_api::diagnostics_route())
+        .route("/log/report-bug", diagnostics_api::report_bug_route())
         .route("/shells", get(fs_api::shells))
         // ACP catalog web routes (CAP-6: Web & Mobile 1:1 Parity). Each
         // mirrors a desktop `#[tauri::command] acp_*_catalog` handler; see
@@ -456,6 +464,7 @@ const GATED_PREFIXES: &[&str] = &[
     "/canvas/",
 ];
 
+
 /// Whether `path` is a gated API route. Pure decision fn (unit-testable).
 fn requires_token(path: &str) -> bool {
     if PUBLIC_PATHS.contains(&path) {
@@ -599,6 +608,8 @@ pub fn router_with_static(
         .route("/skills", get(skills_api::list))
         .route("/skills/{name}", get(skills_api::read))
         .route("/log/frontend-error", log_api::route())
+        .route("/log/diagnostics", diagnostics_api::diagnostics_route())
+        .route("/log/report-bug", diagnostics_api::report_bug_route())
         .route("/shells", get(fs_api::shells))
         .route("/acp/catalog", get(catalog_api::list))
         .route("/acp/catalog/opt-in", post(catalog_api::set_opt_in))

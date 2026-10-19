@@ -18,8 +18,8 @@ pub mod agent_reaper;
 #[cfg(test)]
 mod agent_reaper_tests;
 
-pub mod assets;
 pub mod acp_api;
+pub mod assets;
 pub mod auth;
 pub mod browser_policy_api;
 pub mod canvas_api;
@@ -30,6 +30,7 @@ pub mod chat_reads;
 pub mod command_ledger;
 pub mod config;
 pub mod connection_runtime;
+pub mod diagnostics_api;
 pub mod fs_api;
 pub mod fs_watcher;
 pub mod git_api;

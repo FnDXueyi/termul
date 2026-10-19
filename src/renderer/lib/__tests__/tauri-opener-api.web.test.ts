@@ -3,7 +3,7 @@
  *
  * `openUrlWithSystemBrowser` branches on `isTauriContext()`: desktop calls
  * `@tauri-apps/plugin-opener`'s `openUrl(url)`; web/remote calls
- * `window.open(url, '_blank', 'noopener')`. The other two methods
+ * `window.open(url, '_blank')`. The other two methods
  * (`openWithExternalApp`, `revealInFileManager`) have no browser equivalent
  * and return an explicit `WEB_UNSUPPORTED` result on web — they never reach
  * the stubbed plugin (which would throw `tauriUnavailable`).
@@ -52,27 +52,37 @@ describe('openerApi.openUrlWithSystemBrowser (web vs desktop branch)', () => {
     vi.unstubAllGlobals()
   })
 
-  it('web: calls window.open(url, "_blank", "noopener")', async () => {
+  it('web: calls window.open(url, "_blank") and clears the opener handle', async () => {
     mockIsTauriContext.mockReturnValue(false)
-    mockWindowOpen.mockReturnValue(null)
+    const openedWindow: { opener: unknown } = { opener: {} }
+    mockWindowOpen.mockReturnValue(openedWindow)
 
     const result = await openerApi.openUrlWithSystemBrowser(URL)
 
     expect(result).toEqual({ success: true, data: undefined })
-    expect(mockWindowOpen).toHaveBeenCalledWith(URL, '_blank', 'noopener')
+    expect(mockWindowOpen).toHaveBeenCalledWith(URL, '_blank')
+    // 'noopener' is not in the feature string (it would make the null check
+    // lie), so the opener reference is cleared manually instead.
+    expect(openedWindow.opener).toBeNull()
     expect(mockOpenUrl).not.toHaveBeenCalled()
   })
 
-  it('web: returns success even when popup blocker returns null (best-effort)', async () => {
+  it('web: returns OPEN_URL_ERROR when the popup blocker returns null', async () => {
     mockIsTauriContext.mockReturnValue(false)
     mockWindowOpen.mockReturnValue(null)
 
     const result = await openerApi.openUrlWithSystemBrowser(URL)
 
-    expect(result.success).toBe(true)
+    // An honest failure: callers reporting "the issue page opened" must not
+    // get a `success: true` for a tab that never appeared.
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.code).toBe('OPEN_URL_ERROR')
+    }
+    expect(mockWindowOpen).toHaveBeenCalledWith(URL, '_blank')
   })
 
-  it('web: swallows SecurityError from window.open (best-effort)', async () => {
+  it('web: returns OPEN_URL_ERROR when window.open throws (SecurityError)', async () => {
     mockIsTauriContext.mockReturnValue(false)
     mockWindowOpen.mockImplementation(() => {
       throw new Error('SecurityError: blocked')
@@ -80,8 +90,12 @@ describe('openerApi.openUrlWithSystemBrowser (web vs desktop branch)', () => {
 
     const result = await openerApi.openUrlWithSystemBrowser(URL)
 
-    expect(result).toEqual({ success: true, data: undefined })
-    expect(mockWindowOpen).toHaveBeenCalledWith(URL, '_blank', 'noopener')
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.code).toBe('OPEN_URL_ERROR')
+      expect(result.error).toBe('SecurityError: blocked')
+    }
+    expect(mockWindowOpen).toHaveBeenCalledWith(URL, '_blank')
   })
 
   it('web: no-ops for non-http(s)/mailto schemes (javascript:/data:) — no window.open', async () => {

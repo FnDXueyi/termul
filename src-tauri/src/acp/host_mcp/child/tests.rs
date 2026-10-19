@@ -360,7 +360,10 @@ async fn ask_user_schema_lists_question_options_and_free_text() {
             "allow_free_text",
             "header",
         ] {
-            assert!(schema["properties"].get(field).is_some(), "{field} missing: {schema}");
+            assert!(
+                schema["properties"].get(field).is_some(),
+                "{field} missing: {schema}"
+            );
         }
         let required: Vec<&str> = schema["required"]
             .as_array()
@@ -397,12 +400,17 @@ async fn a_client_cancelled_ask_user_ends_the_parked_call_in_the_parent() {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let (server_read, server_write) = tokio::io::split(server_io);
     let (client_read, mut client_write) = tokio::io::split(client_io);
-    let serve = tokio::spawn(async move { serve_mcp_transport(config, server_read, server_write).await });
+    let serve =
+        tokio::spawn(async move { serve_mcp_transport(config, server_read, server_write).await });
 
     let mut reader = BufReader::new(client_read);
     let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test-client","version":"0.0.1"}}}"#;
     let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask_user","arguments":{"question":"Proceed?","options":[{"label":"Yes"}]}}}"#;
-    for line in [init, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, call] {
+    for line in [
+        init,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        call,
+    ] {
         client_write.write_all(line.as_bytes()).await.unwrap();
         client_write.write_all(b"\n").await.unwrap();
         if line == init {
@@ -432,7 +440,11 @@ async fn a_client_cancelled_ask_user_ends_the_parked_call_in_the_parent() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 
-    assert_eq!(parent.open_ask_ids(), Vec::<String>::new(), "the parked call ended");
+    assert_eq!(
+        parent.open_ask_ids(),
+        Vec::<String>::new(),
+        "the parked call ended"
+    );
     assert!(
         !parent.answer_ask(&question_id, Some(vec!["Yes".to_string()])),
         "a late answer is refused"
@@ -676,13 +688,17 @@ async fn tools_list_carries_figcraft_tools_by_name_with_the_canvas_tag() {
                 .iter()
                 .find(|tool| tool["name"] == definition["name"])
                 .expect("every figcraft tool is listed");
-            for field in ["inputSchema", "title", "annotations"] {
+            for field in ["inputSchema", "title"] {
                 assert_eq!(
                     tool[field], definition[field],
                     "{} {field}",
                     definition["name"]
                 );
             }
+            if definition["name"] == "export" {
+                continue;
+            }
+            assert_eq!(tool["annotations"], definition["annotations"]);
             let upstream = definition["description"].as_str().unwrap_or_default();
             assert_eq!(
                 tool["description"].as_str(),
@@ -691,6 +707,24 @@ async fn tools_list_carries_figcraft_tools_by_name_with_the_canvas_tag() {
                 definition["name"]
             );
         }
+        let export = tools
+            .iter()
+            .find(|tool| tool["name"] == "export")
+            .expect("export is listed");
+        assert_eq!(
+            export["annotations"]["readOnlyHint"], false,
+            "Termul's export writes files"
+        );
+        assert_eq!(export["annotations"]["destructiveHint"], true);
+        let description = export["description"].as_str().unwrap_or_default();
+        assert!(
+            !description.contains("absolute path"),
+            "Termul refuses absolute paths: {description}"
+        );
+        assert!(
+            description.contains("relative to the project"),
+            "{description}"
+        );
         drop(writer);
     })
     .await;

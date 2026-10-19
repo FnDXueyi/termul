@@ -326,6 +326,11 @@ impl HostPlanServer {
         self.presence.name_agent(agent_id, name);
     }
 
+    /// `agent_id` exited; presence forgets its name.
+    pub fn forget_agent(&self, agent_id: &str) {
+        self.presence.forget_agent(agent_id);
+    }
+
     /// The canvas router: renderers report mounts and replies to it.
     #[must_use]
     pub fn canvas_router(&self) -> Arc<CanvasRouter> {

@@ -213,8 +213,56 @@ fn export_with_a_project_path_writes_the_inline_bytes_there() {
     let sent: Value = serde_json::from_str(&frame.params).unwrap();
     assert_eq!(
         sent,
-        json!({"command": "file.export", "params": {"ids": [18_446_744_073_709_551_615u64], "scale": 2.0}})
+        json!({"command": "file.export", "params": {"ids": [18_446_744_073_709_551_615u64], "scale": 2.0, "format": "png"}})
     );
+}
+
+#[test]
+fn a_link_planted_while_the_editor_exports_does_not_redirect_the_write() {
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside = outside_dir.path().to_path_buf();
+    let planted = harness.cwd.join("out");
+    let (link_target, link) = (outside.clone(), planted.clone());
+    let _seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, move |_| {
+        link_dir(&link_target, &link).ok()?;
+        Some(Ok(json!({"format": "svg", "data": "PHN2Zy8+"}).to_string()))
+    });
+    let mut bridge = Bridge::new(configs[0].clone()).with_tool("export");
+    let result = figcraft_mcp::call_tool(&mut bridge, "export", &json!({"path": "out/x.svg"}));
+    if !planted.exists() {
+        eprintln!("skipped: this machine cannot create a directory link");
+        return;
+    }
+    assert_eq!(tool_error(&result)["code"], "UNSUPPORTED_IN_KIOSK");
+    assert!(
+        !outside.join("x.svg").exists(),
+        "nothing was written outside the project"
+    );
+}
+
+/// A directory link: a symlink, or on Windows without the symlink privilege a
+/// junction, which needs none.
+fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, link);
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return Ok(());
+        }
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("mklink /J failed"))
+        }
+    }
 }
 
 #[test]

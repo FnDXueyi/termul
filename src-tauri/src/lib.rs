@@ -11,10 +11,13 @@ mod browser_tab_saved_grants;
 // Canvas mode: shared, Tauri-free bundle server + persistence. Compiled
 // unconditionally so the standalone `termul-server` mounts the same routes.
 pub mod canvas;
+mod commands;
 // One host per durable path (AD-14): sidecar `File::try_lock` locks taken before
 // any store opens. Tauri-free so the desktop and `termul-server` share it.
-mod commands;
 pub mod data_lock;
+// Bug-report diagnostics bundle + `gh` submit: Tauri-free core so the
+// desktop and `termul-server` share it (like `data_lock`/`server_update`).
+pub mod diagnostics;
 mod exit_cleanup;
 mod host_perimeter;
 mod logging;
@@ -2110,6 +2113,10 @@ pub fn run() {
             commands::acp_history_get_legacy,
             // Frontend error forwarding (issue #244)
             commands::log_frontend_error,
+            // Bug-report diagnostics + host-side `gh` submit
+            // (spec-bug-report-dialog); mirrors the `/log/*` web routes.
+            commands::collect_bug_report_context,
+            commands::submit_bug_report,
             // Agentation annotation service (issue #451, Epic 1)
             agentation::agentation_create_session,
             agentation::agentation_list_sessions,

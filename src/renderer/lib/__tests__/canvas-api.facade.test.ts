@@ -256,6 +256,13 @@ describe('canvasApi (web vs desktop branch)', () => {
       args: { projectId: PROJECT, mountSeq: 3 }
     },
     {
+      name: 'diskChanged after a failed reload',
+      call: () => canvasApi.diskChanged(PROJECT, 3, true),
+      command: 'canvas_disk_changed',
+      route: '/canvas/disk-changed',
+      args: { projectId: PROJECT, mountSeq: 3, reloadFailed: true }
+    },
+    {
       name: 'resolveConflict',
       call: () =>
         canvasApi.resolveConflict(PROJECT, 3, 'saveCopy', '{"contentVersion":8,"bytes":"AA=="}'),

@@ -150,7 +150,11 @@ impl CanvasError {
 pub type CanvasOutcome = Result<String, CanvasError>;
 
 /// Parent → renderer: `{"type":"canvas_call", callId, projectId, mountSeq,
-/// method, params}`. `params` is JSON text the renderer forwards unparsed.
+/// method, params, timeoutMs?}`. `params` is JSON text the renderer forwards
+/// unparsed. `timeoutMs` is how long the host still waits for the reply: a
+/// call still queued for a loading editor once it passed is answered
+/// `CANVAS_TIMEOUT` without running, so a retry after the host's timeout
+/// cannot apply twice. A notice nobody waits for has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasCallFrame {
@@ -161,6 +165,8 @@ pub struct CanvasCallFrame {
     pub mount_seq: u64,
     pub method: String,
     pub params: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Renderer → parent `canvas_reply` payload: `{callId, mountSeq, ok, result}`
@@ -323,7 +329,15 @@ impl CanvasCallFrame {
             mount_seq,
             method: method.to_string(),
             params,
+            timeout_ms: None,
         }
+    }
+
+    /// The frame of a call the host waits `left` more for.
+    #[must_use]
+    pub fn expiring_in(mut self, left: Duration) -> Self {
+        self.timeout_ms = Some(duration_ms(left).max(1));
+        self
     }
 }
 

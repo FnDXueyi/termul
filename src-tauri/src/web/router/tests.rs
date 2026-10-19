@@ -440,6 +440,94 @@ async fn health_reports_admitted_for_non_loopback_with_opt_in() {
     );
 }
 
+/// Bug-report routes (spec-bug-report-dialog): both are registered in the
+/// test-variant router and guarded as `/log/` mutations — a denied peer gets
+/// the `FORBIDDEN` IpcBody and never reaches the collect/submit work (an
+/// admitted `/log/report-bug` would spawn a real `gh`, so the denied guard
+/// is the only side-effect-free probe at this level; admitted-path coverage
+/// lives in `web/diagnostics_api/tests.rs`).
+#[tokio::test]
+async fn bug_report_routes_are_registered_and_write_guarded() {
+    let dir = TempDir::new("bug-report-routes");
+    let app = test_router_with_fixture(dir.path());
+
+    // Registered as POST routes: a bare GET is a method rejection, not the
+    // SPA fallback's 200/404.
+    for path in ["/log/diagnostics", "/log/report-bug"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{path} must be a registered POST route"
+        );
+    }
+
+    // A non-loopback peer without the opt-in is refused BEFORE the collect
+    // runs (no host log tail may leak) or `gh` is spawned.
+    let remote = SocketAddr::from(([203, 0, 113, 9], 40000));
+    for (path, body) in [
+        ("/log/diagnostics", "{}"),
+        ("/log/report-bug", r#"{"title":"t","body":"b"}"#),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .extension(ConnectInfo(remote))
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(parsed["success"], false, "{path}");
+        assert_eq!(parsed["code"], "FORBIDDEN", "{path}");
+    }
+
+    // Shared-live posture denies every peer, loopback included.
+    let shared_live = gated_router(dir.path(), true, true);
+    for (path, body) in [
+        ("/log/diagnostics", "{}"),
+        ("/log/report-bug", r#"{"title":"t","body":"b"}"#),
+    ] {
+        let resp = shared_live
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54321))))
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(parsed["code"], "FORBIDDEN", "{path} in shared-live mode");
+    }
+}
+
 #[tokio::test]
 async fn ws_route_no_longer_returns_501_placeholder() {
     let dir = TempDir::new("ws");
@@ -620,6 +708,8 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
         "/skills",
         "/skills/x",
         "/log/frontend-error",
+        "/log/diagnostics",
+        "/log/report-bug",
         "/shells",
         "/acp/catalog",
         "/acp/install",
