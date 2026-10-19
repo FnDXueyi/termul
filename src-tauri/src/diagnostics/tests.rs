@@ -36,15 +36,24 @@ fn tail_masks_secrets_and_home_paths() {
     assert!(out.contains("Bearer [redacted]"), "{out}");
     assert!(out.contains("~/projects/x"), "{out}");
     assert!(out.contains("ls ~ ~/y ~\\z"), "{out}");
-    for secret in [
+    for (index, secret) in [
         "hunter2",
         "abcdef0123456789",
         "ghp_0123456789abcdefghij0123456789",
         "/home/tester",
         "$HOME",
         "%USERPROFILE%",
-    ] {
-        assert!(!out.contains(secret), "leaked {secret}: {out}");
+    ]
+    .iter()
+    .enumerate()
+    {
+        // The marker value itself stays out of the message — a panic string
+        // can land in captured logs, and CodeQL flags secrets written to
+        // log sinks.
+        assert!(
+            !out.contains(secret),
+            "redaction left marker #{index} in the output"
+        );
     }
 }
 
@@ -395,9 +404,11 @@ fn gh_success_returns_issue_url_and_cleans_up_body_file() {
     );
     let create = calls.nth(2);
     assert_eq!(create[..4], ["issue", "create", "-R", "gnoviawan/termul"]);
-    assert!(create
-        .windows(2)
-        .any(|w| w[0] == "--title" && w[1] == "the title"));
+    assert!(
+        create
+            .windows(2)
+            .any(|w| w[0] == "--title" && w[1] == "the title")
+    );
     assert!(!create.iter().any(|a| a == "--label"));
 
     // Body reached the file and the file is gone after return.

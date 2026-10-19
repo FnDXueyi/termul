@@ -400,6 +400,15 @@ describe('draftBugReport (spec-bug-report-dialog)', () => {
               toolCall: { toolCallId: 't1', title: 'tool', status: 'pending' }
             })
           } else {
+            // A partial reply before the crash gives the ephemeral session
+            // transcript content — it must still be dropped, not promoted to
+            // a persisted chat entry (CodeRabbit #1433).
+            store._onMessageChunk({
+              agentId: 'agent-1',
+              sessionId: 'draft-session',
+              role: 'agent',
+              content: { type: 'text', text: '{"title":"partial' }
+            })
             store._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
           }
           return new Promise<string>(() => {})
@@ -414,6 +423,9 @@ describe('draftBugReport (spec-bug-report-dialog)', () => {
         })
       ).resolves.toBeNull()
       expect(useAcpStore.getState().sessions['draft-session']).toBeUndefined()
+      expect(
+        useAcpStore.getState().sessionIndex.some((entry) => entry.id === 'draft-session')
+      ).toBe(false)
     }
   })
 

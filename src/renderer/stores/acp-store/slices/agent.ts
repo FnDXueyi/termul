@@ -1123,7 +1123,16 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
           // truly-empty pooled (ephemeral) session is dropped to avoid orphan
           // "Untitled Chat" entries.
           const hasContent = (s.messages[id]?.length ?? 0) > 0
-          if (ephemeralSessionIds.has(id) && !hasContent) {
+          // A one-shot collector session (commit message, terminal assist,
+          // bug-report draft) stays ephemeral even when the echoed prompt
+          // gave it transcript content: its reject above runs synchronously
+          // while the collector's own map cleanup happens in a later
+          // microtask, so the map check is the only reliable marker here.
+          const oneShot =
+            commitMessageCollectors.has(id) ||
+            terminalAssistCollectors.has(id) ||
+            bugReportCollectors.has(id)
+          if (oneShot || (ephemeralSessionIds.has(id) && !hasContent)) {
             delete sessions[id]
             ephemeralSessionIds.delete(id)
             dropTranscriptIds.push(id)
