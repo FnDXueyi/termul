@@ -87,6 +87,96 @@ fn expired_token_with_refresh_is_treatable_as_expired() {
     assert!(is_token_expired(&expired));
 }
 
+/// Issue #1364: two concurrent `get_valid_token` calls must coalesce into
+/// one POST at the token endpoint, and both callers must receive the
+/// refreshed token. Without the single-flight lock, the second caller
+/// refreshes with the already-rotated (single-use) refresh token, gets
+/// `invalid_grant`, and deletes the first caller's stored token.
+#[tokio::test]
+async fn concurrent_refreshes_join_into_one_token_request() {
+    let (url, requests) = serve_token_endpoint(serde_json::json!({
+        "access_token": "fresh-access",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }))
+    .await;
+    store_token(&url, &expired_token_with_refresh(&url)).unwrap();
+
+    let a = get_valid_token(&url);
+    let b = get_valid_token(&url);
+    let (a, b) = tokio::join!(a, b);
+
+    let stored = load_stored_token(&url).unwrap();
+    delete_stored_token(&url).unwrap();
+
+    assert_eq!(a.unwrap().as_deref(), Some("fresh-access"));
+    assert_eq!(b.unwrap().as_deref(), Some("fresh-access"));
+    let stored = stored.expect("the refreshed token is stored");
+    assert_eq!(stored.access_token, "fresh-access");
+    assert_eq!(requests.lock().len(), 1, "exactly one POST /token");
+}
+
+/// Issue #1364: a transient failure (connection error — server unreachable)
+/// during refresh must keep the stored token so a later chat can retry,
+/// instead of deleting it and forcing a new sign-in.
+#[tokio::test]
+async fn connection_error_during_refresh_keeps_the_stored_token() {
+    // Port 1 is reserved and closed on every platform: connecting fails fast.
+    let url = "http://127.0.0.1:1/mcp".to_string();
+    store_token(&url, &expired_token_with_refresh(&url)).unwrap();
+    let generation = token_generation(&url);
+
+    let token = get_valid_token(&url).await;
+
+    // Assert before the cleanup delete: delete_stored_token itself bumps
+    // the generation counter.
+    assert_eq!(token.unwrap(), None);
+    assert_eq!(token_generation(&url), generation, "no delete happened");
+    let stored = load_stored_token(&url).unwrap();
+    delete_stored_token(&url).unwrap();
+
+    // No token is delivered (the chat continues without a bearer), but the
+    // stored refresh token survives the failure.
+    let stored = stored.expect("the stored token survives a network failure");
+    assert_eq!(stored.refresh_token.as_deref(), Some("stored-refresh"));
+}
+
+/// Issue #1364: when the auth server definitively rejects the refresh token
+/// (HTTP 400 `invalid_grant`), the stored token is deleted so the user is
+/// re-prompted instead of retrying a dead refresh token forever.
+#[tokio::test]
+async fn rejected_refresh_token_deletes_the_stored_token() {
+    let app = axum::Router::new().route(
+        "/token",
+        axum::routing::post(|| async {
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "error": "invalid_grant",
+                        "error_description": "refresh token invalid",
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    store_token(&url, &expired_token_with_refresh(&url)).unwrap();
+    let generation = token_generation(&url);
+
+    let token = get_valid_token(&url).await;
+
+    assert_eq!(token.unwrap(), None);
+    assert_eq!(token_generation(&url), generation + 1, "the token was deleted");
+    assert!(load_stored_token(&url).unwrap().is_none());
+}
+
 /// An MCP server that publishes no OAuth metadata, so a client falls back to
 /// its legacy `/token` endpoint. Answers every token request with `body` and
 /// records the form bodies it received.
