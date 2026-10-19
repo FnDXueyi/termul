@@ -790,6 +790,38 @@ describe('disk changes (AD-27)', () => {
     expect(toastWarning).not.toHaveBeenCalled()
   })
 
+  it('a reload is not applied once the editor moved past the version the host judged clean', async () => {
+    const editor = await mountReady()
+    dirtyChanged.mockReturnValueOnce(new Promise(() => {}))
+    editor.dirty(true, '4')
+    diskChanged
+      .mockResolvedValueOnce(ok({ kind: 'reload', view: view(), bytes: 'bmV3' }))
+      .mockResolvedValueOnce(
+        ok({ kind: 'conflict', view: view({ dirty: true, conflict: CONFLICT }) })
+      )
+    await useCanvasStore.getState().checkDisk(PROJECT)
+
+    expect(editor.sent('host.openDocument')).toHaveLength(1)
+    expect(diskChanged).toHaveBeenLastCalledWith(PROJECT, 41, true)
+    expect(session()?.conflict).toEqual(CONFLICT)
+    expect(toastWarning).toHaveBeenCalledTimes(1)
+  })
+
+  it('a reload the editor refuses is reported, and the host raises a conflict', async () => {
+    const editor = await mountReady()
+    diskChanged
+      .mockResolvedValueOnce(ok({ kind: 'reload', view: view(), bytes: 'bmV3' }))
+      .mockResolvedValueOnce(ok({ kind: 'conflict', view: view({ conflict: CONFLICT }) }))
+    const checking = useCanvasStore.getState().checkDisk(PROJECT)
+    await flush()
+    editor.fail('host.openDocument', 'ENGINE_ERROR')
+    await checking
+
+    expect(diskChanged).toHaveBeenLastCalledWith(PROJECT, 41, true)
+    expect(documentLoaded).toHaveBeenCalledTimes(1)
+    expect(session()?.conflict).toEqual(CONFLICT)
+  })
+
   it('a change under unsaved edits raises the conflict once', async () => {
     await conflicted()
     expect(session()?.conflict).toEqual(CONFLICT)

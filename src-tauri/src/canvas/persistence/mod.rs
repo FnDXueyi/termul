@@ -85,8 +85,8 @@ pub use lease::{
     DEFAULT_LEASE_GRACE_MS,
 };
 pub use wire::{
-    dirty_changed, document_loaded, parse_version, read_document, resolve_conflict, write_snapshot,
-    DocumentBytes, CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD, CODE_READ_FAILED,
+    dirty_changed, disk_changed, document_loaded, parse_version, read_document, resolve_conflict,
+    write_snapshot, DocumentBytes, CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD, CODE_READ_FAILED,
 };
 
 /// `canvas.autosave_ms` when the renderer sends none.
@@ -130,6 +130,11 @@ struct Persisted {
     /// The file changed on disk while the editor held unsaved work (AD-27).
     /// Autosave is suppressed until the user resolves it.
     conflict: Option<disk::Conflict>,
+    /// The file handed to the editor to load (a reload, or the user taking
+    /// the disk's version). Until the editor loaded it the editor still holds
+    /// the old content, so nothing is written; the file becomes the one the
+    /// next write replaces once it has.
+    reloading: Option<Expected>,
     /// Wall-clock ms of the first edit not on disk; shown when a crash
     /// loses it.
     unsaved_since: Option<u64>,
@@ -541,6 +546,13 @@ impl CanvasPersistence {
         let mount = self.mount_for(project_id, mount_seq)?;
         {
             let mut state = mount.state.lock();
+            if let Phase::Ready(Persisted {
+                reloading: Some(handed),
+                ..
+            }) = &state.phase
+            {
+                state.disk = Some(handed.clone());
+            }
             state.phase = Phase::Ready(Persisted {
                 content_version,
                 saved_version: content_version,
@@ -646,6 +658,12 @@ impl CanvasPersistence {
                     return Err(CanvasError::new(
                         CODE_CANVAS_NOT_READY,
                         "the canvas document has not loaded yet",
+                    ))
+                }
+                Phase::Ready(persisted) if persisted.reloading.is_some() => {
+                    return Err(CanvasError::new(
+                        CODE_CANVAS_NOT_READY,
+                        "the canvas is loading the document from disk; save again once it has",
                     ))
                 }
                 Phase::Ready(persisted)

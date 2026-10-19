@@ -438,31 +438,51 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     if (outcome.kind === 'saveDue') await runSave(projectId, mountSeq)
   }
 
+  /** The disk change the host raised as a conflict: shown once. */
+  const showConflict = (projectId: string, view: CanvasPersistenceView): void => {
+    const session = get().sessions[projectId]
+    const hadConflict = session?.conflict != null
+    patchSession(projectId, projectionOf(view))
+    if (session && view.conflict && !hadConflict) {
+      toast.warning(`${basename(session.docPath)} changed on disk`, {
+        description: 'The canvas has unsaved changes. Choose which version to keep.'
+      })
+    }
+  }
+
+  /** The editor did not load what the host handed it, so it still holds its
+   * old content: the host makes the change on disk a conflict (AD-27). */
+  const reloadNotTaken = async (projectId: string, mountSeq: number, why: string) => {
+    logCanvas('warn', 'reload', `canvas reload not applied for project ${projectId}: ${why}`)
+    const reported = await canvasApi.diskChanged(projectId, mountSeq, true)
+    if (isLiveMount(projectId, mountSeq) && reported.success) {
+      showConflict(projectId, reported.data.view)
+    }
+    return false
+  }
+
   /** Load the disk's `bytes` into the mounted editor; the host re-initialises
-   * the saved version from the `host.openDocument` ack (AD-31). */
+   * the saved version from the `host.openDocument` ack (AD-31). `cleanAt` is
+   * the version the host judged clean: an editor that has moved past it holds
+   * edits the reload would drop, so it is not reloaded. */
   const reloadDocument = async (
     projectId: string,
     mountSeq: number,
-    bytes: string
+    bytes: string,
+    cleanAt?: string | null
   ): Promise<boolean> => {
     const bridge = currentBridge(projectId, mountSeq)
     if (!bridge) return false
+    const now = get().sessions[projectId]
+    if (cleanAt !== undefined && (now?.dirty || now?.contentVersion !== cleanAt)) {
+      return reloadNotTaken(projectId, mountSeq, 'the editor changed since it was judged clean')
+    }
     const opened = await bridge.call('host.openDocument', asJsonText(JSON.stringify({ bytes })))
     if (!isLiveMount(projectId, mountSeq)) return false
-    if (!opened.ok) {
-      logCanvas(
-        'warn',
-        'reload',
-        `canvas reload failed for project ${projectId}: ${opened.error.code}`
-      )
-      return false
-    }
+    if (!opened.ok) return reloadNotTaken(projectId, mountSeq, opened.error.code)
     const loaded = await canvasApi.documentLoaded(projectId, mountSeq, opened.result)
     if (!isLiveMount(projectId, mountSeq)) return false
-    if (!loaded.success) {
-      logCanvas('warn', 'reload', `canvas reload failed for project ${projectId}: ${loaded.code}`)
-      return false
-    }
+    if (!loaded.success) return reloadNotTaken(projectId, mountSeq, loaded.code)
     patchSession(projectId, projectionOf(loaded.data))
     return true
   }
@@ -753,16 +773,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       }
       const outcome = result.data
       if (outcome.kind === 'reload') {
-        await reloadDocument(projectId, mountSeq, outcome.bytes)
+        await reloadDocument(projectId, mountSeq, outcome.bytes, outcome.view.contentVersion)
         return
       }
-      const hadConflict = get().sessions[projectId]?.conflict != null
-      patchSession(projectId, projectionOf(outcome.view))
-      if (outcome.kind === 'conflict' && !hadConflict) {
-        toast.warning(`${basename(session.docPath)} changed on disk`, {
-          description: 'The canvas has unsaved changes. Choose which version to keep.'
-        })
-      }
+      showConflict(projectId, outcome.view)
     },
 
     resolveConflict: async (projectId, choice) => {
