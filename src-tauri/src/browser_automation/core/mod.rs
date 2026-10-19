@@ -57,7 +57,7 @@ use consent::ConsentGate;
 use events::TabProjection;
 use ports::{PermissionRequest, PolicyStore};
 use surface::{PaneSurface, TabSurface};
-use tabs::TabRegistry;
+use tabs::{FirstLoad, TabRegistry};
 
 const EVENT_STOP_CHANGED: &str = "acp:browser_stop_changed";
 
@@ -164,7 +164,7 @@ impl DesktopBrowserHost {
         url: &str,
         bounds: BrowserBounds,
     ) -> Result<TabView, TabCreateError> {
-        let url = self
+        let first = self
             .registry
             .lock()
             .begin_create(label, url)
@@ -175,7 +175,7 @@ impl DesktopBrowserHost {
         let built = match self.data_store(label) {
             Ok(store) => {
                 self.surface
-                    .create(label, &url, bounds, self.tab_events(label), store)
+                    .create(label, first.build_url(), bounds, self.tab_events(label), store)
                     .await
             }
             Err(message) => Err(message),
@@ -188,6 +188,18 @@ impl DesktopBrowserHost {
                 code: "BROWSER_TAB_CREATE_FAILED",
                 message,
             });
+        }
+        if let FirstLoad::ViaBlank(url) = first {
+            if let Err(message) = self.surface.navigate(label, url) {
+                self.registry
+                    .lock()
+                    .fail_create(label, "the tab could not load its page");
+                self.surface.close(label).await;
+                return Err(TabCreateError {
+                    code: "BROWSER_TAB_CREATE_FAILED",
+                    message,
+                });
+            }
         }
         let live = self.registry.lock().finish_create(label);
         if !live {

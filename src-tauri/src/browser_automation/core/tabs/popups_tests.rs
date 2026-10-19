@@ -1,4 +1,4 @@
-use super::super::mint_agent_label;
+use super::super::{mint_agent_label, FirstLoad};
 use super::*;
 
 const OPENER: &str = "agent-0b7c2d1e-5f60-4a1b-9c2d-3e4f5a6b7c8d";
@@ -25,8 +25,8 @@ fn a_popup_runs_on_the_opener_session_and_profile_and_never_becomes_default() {
         .expect_popup_tab(&popup, OPENER, "https://example.com/pop")
         .unwrap();
     assert_eq!(
-        registry.begin_create(&popup, "ignored").as_deref(),
-        Ok("https://example.com/pop")
+        registry.begin_create(&popup, "ignored"),
+        Ok(FirstLoad::ViaBlank("https://example.com/pop".to_string()))
     );
     assert!(registry.finish_create(&popup));
     let record = registry.get(&popup).unwrap();

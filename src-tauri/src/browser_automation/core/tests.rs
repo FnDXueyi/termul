@@ -116,7 +116,12 @@ impl TabSurface for FakePane {
             if self.fail_create {
                 return Err("the browser engine did not create the tab: not created".to_string());
             }
-            let landed = load(&events, url).unwrap_or_else(|| "about:blank".to_string());
+            // As tauri does, a webview built at about:blank starts no load.
+            let landed = match url {
+                "about:blank" => None,
+                url => load(&events, url),
+            }
+            .unwrap_or_else(|| "about:blank".to_string());
             self.tabs.lock().insert(
                 label.to_string(),
                 FakeTab {
@@ -800,6 +805,35 @@ async fn a_quoted_wait_duration_runs_as_a_number() {
         (reply["code"].as_str(), reply["message"].as_str()),
         (Some("invalid_params"), Some("wait: 'ms' must be a non-negative integer"))
     );
+}
+
+#[tokio::test]
+async fn an_agent_tab_is_built_blank_and_neither_agent_nor_renderer_sees_the_blank() {
+    let h = harness_with(FakeEngine::new(webview2_like()));
+    let reply = h.call("navigate", json!({ "url": "https://example.com/one" })).await;
+    assert_eq!(epoch_and_url(&reply), (Some(1), Some("https://example.com/one")));
+    let tab = tab_of(&reply);
+    assert_eq!(h.pane.tabs.lock()[&tab].history, ["about:blank", "https://example.com/one"]);
+    let mut shown: Vec<String> = h
+        .pane
+        .published
+        .lock()
+        .iter()
+        .filter_map(|p| match p {
+            TabProjection::Updated(view) => Some(view.url.clone()),
+            TabProjection::Closed { .. } => None,
+        })
+        .collect();
+    shown.extend(
+        h.sink
+            .seen
+            .lock()
+            .iter()
+            .filter(|e| e.type_ == "acp:browser_tab_updated")
+            .map(|e| e.payload["url"].as_str().unwrap_or_default().to_string()),
+    );
+    assert!(!shown.is_empty());
+    assert!(shown.iter().all(|url| url == "https://example.com/one"), "{shown:?}");
 }
 
 pub(super) fn tab_of(reply: &Value) -> String {

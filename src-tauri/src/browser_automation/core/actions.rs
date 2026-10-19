@@ -361,8 +361,8 @@ impl DesktopBrowserHost {
                     .map_err(BrowserError::internal)?;
                 (label, rx)
             }
-            // No tabId and the session has no default tab: open one already
-            // pointing at the target URL (no double navigation).
+            // No tabId and the session has no default tab: open one whose
+            // first navigation is this one.
             Ok(None) => self.open_agent_tab(session_id, &url).await?,
             // An explicit tabId that is not this session's live agent tab is
             // a caller error: never fall back to, or open, another tab.

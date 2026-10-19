@@ -24,8 +24,8 @@ fn live_agent_tab(
     let mut opened = registry.expect_agent_tab(label, session, "https://example.com/", TabProfile::Global)
         .unwrap();
     assert_eq!(
-        registry.begin_create(label, "ignored").as_deref(),
-        Ok("https://example.com/")
+        registry.begin_create(label, "ignored"),
+        Ok(FirstLoad::ViaBlank("https://example.com/".to_string()))
     );
     assert!(registry.finish_create(label));
     opened
@@ -66,8 +66,8 @@ fn the_renderer_cannot_create_a_tab_the_registry_did_not_admit() {
         "an agent label nobody asked for"
     );
     assert_eq!(
-        registry.begin_create(USER, "https://a.test/").as_deref(),
-        Ok("https://a.test/")
+        registry.begin_create(USER, "https://a.test/"),
+        Ok(FirstLoad::Direct("https://a.test/".to_string()))
     );
     assert_eq!(
         registry.begin_create(USER, "https://a.test/"),
