@@ -45,7 +45,7 @@ interface WorkRunGroupProps {
   summary: ToolActivitySummary
   /** The parent turn is still running. */
   active: boolean
-  /** True while this run owns the turn's last timeline item, so its trailing thought streams. */
+  /** True while this run owns the turn's last timeline item: the label shimmers and its trailing thought streams. */
   isLiveTail: boolean
   /** A call failed: the trigger reads red. */
   failed: boolean
@@ -91,7 +91,12 @@ function WorkRunGroupComponent({
         >
           <ChevronRight size={13} />
         </motion.span>
-        <span className="truncate tabular-nums">{summary.label}</span>
+        {/* The shimmer is CSS on data-text, so a count change re-renders in place. */}
+        <span className={cn('t-think is-start min-w-0', !isLiveTail && 'is-settled')}>
+          <span className="t-think-text tabular-nums" data-text={summary.label}>
+            {summary.label}
+          </span>
+        </span>
         <DiffStat added={summary.added} removed={summary.removed} />
       </CollapsibleTrigger>
       <CollapsibleContent forceMount>

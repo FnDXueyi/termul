@@ -381,6 +381,28 @@ describe('ChatMessageList', () => {
     expect(screen.getAllByText('Read 2 files')).toHaveLength(1)
   })
 
+  it('shimmers the live run label until narration lands', () => {
+    const { rerender } = render(
+      <ChatMessageList
+        items={[userItem, completedToolItem]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+    const label = (): Element | null =>
+      screen.getByRole('button', { name: 'Read 1 file' }).querySelector('.t-think')
+    expect(label()).not.toHaveClass('is-settled')
+
+    rerender(
+      <ChatMessageList
+        items={[userItem, completedToolItem, streamingAgentItem]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+    expect(label()).toHaveClass('is-settled')
+  })
+
   it('keeps a manually opened live run open as more calls join it', () => {
     const secondRead: TimelineItem = {
       kind: 'tool',
