@@ -96,6 +96,7 @@ import { liveSiblingCount, reloadInFlight } from '../reload-guard'
 import {
   adoptHostOwnedAgent,
   beginSessionReopen,
+  bugReportCollectors,
   cancelledChatLaunches,
   commitMessageCollectors,
   ensureLiveAgent,
@@ -108,6 +109,7 @@ import {
   persistSession,
   rebaseSeqCounter,
   rebaseUntitledCounter,
+  rejectBugReportCollector,
   rejectCommitMessageCollector,
   rejectTerminalAssistCollector,
   sessionReopenGenerations,
@@ -2540,11 +2542,14 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     }
     const hadCommit = commitMessageCollectors.has(e.sessionId)
     const hadAssist = terminalAssistCollectors.has(e.sessionId)
+    const hadBugReport = bugReportCollectors.has(e.sessionId)
     if (hadCommit)
       rejectCommitMessageCollector(e.sessionId, 'The temporary ACP session closed unexpectedly')
     if (hadAssist)
       rejectTerminalAssistCollector(e.sessionId, 'The temporary ACP session closed unexpectedly')
-    if (hadCommit || hadAssist) return
+    if (hadBugReport)
+      rejectBugReportCollector(e.sessionId, 'The temporary ACP session closed unexpectedly')
+    if (hadCommit || hadAssist || hadBugReport) return
     // Flush coalesced updates so transcript eviction sees the final state.
     flushCoalescedSync()
     invalidateSessionReopen(e.sessionId)

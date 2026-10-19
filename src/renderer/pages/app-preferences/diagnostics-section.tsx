@@ -1,7 +1,8 @@
-import { Clipboard, Download, FileText, FolderOpen } from '@/components/icons'
+import { Bug, Clipboard, Download, FileText, FolderOpen } from '@/components/icons'
 import { SettingsSection } from '@/components/settings/SettingsLayout'
 import { logApi } from '@/lib/api'
 import { isTauriContext } from '@/lib/tauri-runtime'
+import { useReportBugStore } from '@/stores/report-bug-store'
 
 export function DiagnosticsSection(): React.JSX.Element {
   // Desktop-only actions (issue #843): Reveal Log Folder / Export Log File /
@@ -89,6 +90,22 @@ export function DiagnosticsSection(): React.JSX.Element {
                 </div>
               </button>
             )}
+
+            {/* Report a Bug (spec-bug-report-dialog): the same dialog every
+                other entry point opens — works on desktop and web. */}
+            <button
+              type="button"
+              onClick={() => useReportBugStore.getState().openReport()}
+              className="flex items-center justify-start gap-2.5 px-4 py-3 bg-secondary/30 hover:bg-secondary/60 border border-border rounded-lg text-sm font-medium text-foreground transition-all hover:scale-[1.01] active:scale-[0.99] shadow-sm"
+            >
+              <Bug size={16} className="text-muted-foreground" />
+              <div className="text-left">
+                <div>Report a Bug</div>
+                <div className="text-3xs text-muted-foreground font-normal">
+                  File an issue with diagnostics
+                </div>
+              </div>
+            </button>
           </div>
           {!isDesktop && (
             <p className="text-xs text-muted-foreground">

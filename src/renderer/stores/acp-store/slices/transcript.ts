@@ -53,6 +53,7 @@ import {
 import { useAcpStore } from '../index'
 import {
   activeWirePromptTurns,
+  bugReportCollectors,
   commitMessageCollectors,
   echoedWirePromptTurns,
   handoffOnlyTurnIds,
@@ -61,10 +62,12 @@ import {
   isHistoryCoveredToolEvent,
   liveSwitchSources,
   liveTurnReplaySeq,
+  MAX_BUG_REPORT_RESPONSE_CHARS,
   MAX_COMMIT_MESSAGE_RESPONSE_CHARS,
   MAX_TERMINAL_ASSIST_RESPONSE_CHARS,
   nextSeq,
   persistSession,
+  rejectBugReportCollector,
   rejectCommitMessageCollector,
   rejectTerminalAssistCollector,
   terminalAssistCollectors
@@ -1219,6 +1222,18 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       }
       return
     }
+    const bugReportCollector = bugReportCollectors.get(e.sessionId)
+    if (bugReportCollector) {
+      if (e.role === 'agent' && e.content.type === 'text' && typeof e.content.text === 'string') {
+        bugReportCollector.length += e.content.text.length
+        if (bugReportCollector.length > MAX_BUG_REPORT_RESPONSE_CHARS) {
+          bugReportCollector.reject(new Error('The ACP agent response was too large'))
+        } else {
+          bugReportCollector.chunks.push(e.content.text)
+        }
+      }
+      return
+    }
     // CAP-3 replay contract: drop chunks the installed payload already covers.
     if (isHistoryCoveredEvent(e.sessionId, eventSeq)) return
     // Replay mode replaces the transcript with an immediate set (not a
@@ -1373,11 +1388,13 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   _onToolCall: (e, eventSeq) => {
     const hadCommit = commitMessageCollectors.has(e.sessionId)
     const hadAssist = terminalAssistCollectors.has(e.sessionId)
+    const hadBugReport = bugReportCollectors.has(e.sessionId)
     if (hadCommit)
       rejectCommitMessageCollector(e.sessionId, 'The ACP agent attempted to use a tool')
     if (hadAssist)
       rejectTerminalAssistCollector(e.sessionId, 'The ACP agent attempted to use a tool')
-    if (hadCommit || hadAssist) return
+    if (hadBugReport) rejectBugReportCollector(e.sessionId, 'The ACP agent attempted to use a tool')
+    if (hadCommit || hadAssist || hadBugReport) return
     if (terminalAssistCollectors.has(e.sessionId)) {
       rejectTerminalAssistCollector(e.sessionId, 'The ACP agent attempted to use a tool')
       return

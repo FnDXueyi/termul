@@ -74,7 +74,7 @@ mod history;
 mod project_binding;
 mod reopen;
 mod spawn_error;
-mod stderr_ring;
+pub(crate) mod stderr_ring;
 mod timeouts;
 mod turn;
 mod wire;

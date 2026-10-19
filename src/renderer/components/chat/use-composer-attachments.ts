@@ -428,13 +428,20 @@ export function useComposerAttachments(opts: {
     [disabled, addFiles, imageCapable]
   )
 
-  const removeAttachment = useCallback((id: string) => {
-    const removed = attachmentsRef.current.find((a) => a.id === id)
-    if (removed && removed.kind === 'file-ref' && removed.appOwnedTemp) {
-      void deleteTempFile(removed.path)
-    }
-    setAttachments((prev) => prev.filter((a) => a.id !== id))
-  }, [])
+  const removeAttachment = useCallback(
+    (id: string) => {
+      // Frozen like pick/paste while `disabled`: the Report a Bug dialog
+      // snapshots `attachments.length` at submit and must not let a removal
+      // race mutate what the report claims to carry.
+      if (disabled) return
+      const removed = attachmentsRef.current.find((a) => a.id === id)
+      if (removed && removed.kind === 'file-ref' && removed.appOwnedTemp) {
+        void deleteTempFile(removed.path)
+      }
+      setAttachments((prev) => prev.filter((a) => a.id !== id))
+    },
+    [disabled]
+  )
 
   // Send-path reset: drops React state WITHOUT deleting app-owned temp files,
   // because the agent reads them by path during the turn. Callers register the

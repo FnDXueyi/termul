@@ -82,6 +82,8 @@ interface MobileChatShellProps {
   onRestartTerminal?: (terminalId: string) => void
   /** Opens Project settings (header ⋯ sheet). */
   onOpenProjectSettings?: () => void
+  /** Opens the Report a Bug dialog (both ⋯ sheets; spec-bug-report-dialog). */
+  onReportBug?: () => void
   /** Opens the command history modal (terminal ⋯ sheet). */
   onOpenCommandHistory?: () => void
   /**
@@ -116,6 +118,7 @@ export function MobileChatShell({
   onOpenGitChanges,
   onRestartTerminal,
   onOpenProjectSettings,
+  onReportBug,
   onOpenCommandHistory,
   onNewProject,
   onOpenGitHistory,
@@ -492,6 +495,7 @@ export function MobileChatShell({
         onOpenCommandPalette={openCommandPalette}
         onNewTerminal={newTerminal}
         onOpenProjectSettings={handOffToModal('header-more-sheet', openProjectSettings)}
+        onReportBug={handOffToModal('header-more-sheet', onReportBug)}
         onCloseChat={activeTab?.type === 'agent-chat' ? closeActiveChat : undefined}
         onReloadChat={activeTab?.type === 'agent-chat' ? chatReload.reload : undefined}
         reloadChatDisabled={chatReload.disabled}
@@ -516,6 +520,7 @@ export function MobileChatShell({
           onOpenFiles={openFilesFromSheet}
           onOpenCommandPalette={openCommandPalette}
           onOpenProjectSettings={handOffToModal('terminal-actions-sheet', openProjectSettings)}
+          onReportBug={handOffToModal('terminal-actions-sheet', onReportBug)}
           onCloseTerminal={onCloseTerminal}
         />
       )}

@@ -50,7 +50,9 @@ static TOKEN_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Mask everything in `line` that looks like a key, token or bearer value.
-pub(super) fn redact_line(line: &str) -> String {
+/// `pub(crate)` so the diagnostics collector applies the same mask to log
+/// tails before they leave the host.
+pub(crate) fn redact_line(line: &str) -> String {
     let masked = BEARER.replace_all(line, format!("$1 {MASK}"));
     let masked = NAMED_SECRET.replace_all(&masked, format!("${{1}}{MASK}"));
     TOKEN_SHAPE.replace_all(&masked, MASK).into_owned()

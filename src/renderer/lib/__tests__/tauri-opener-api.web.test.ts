@@ -54,7 +54,7 @@ describe('openerApi.openUrlWithSystemBrowser (web vs desktop branch)', () => {
 
   it('web: calls window.open(url, "_blank", "noopener")', async () => {
     mockIsTauriContext.mockReturnValue(false)
-    mockWindowOpen.mockReturnValue(null)
+    mockWindowOpen.mockReturnValue({})
 
     const result = await openerApi.openUrlWithSystemBrowser(URL)
 
@@ -63,16 +63,22 @@ describe('openerApi.openUrlWithSystemBrowser (web vs desktop branch)', () => {
     expect(mockOpenUrl).not.toHaveBeenCalled()
   })
 
-  it('web: returns success even when popup blocker returns null (best-effort)', async () => {
+  it('web: returns OPEN_URL_ERROR when the popup blocker returns null', async () => {
     mockIsTauriContext.mockReturnValue(false)
     mockWindowOpen.mockReturnValue(null)
 
     const result = await openerApi.openUrlWithSystemBrowser(URL)
 
-    expect(result.success).toBe(true)
+    // An honest failure: callers reporting "the issue page opened" must not
+    // get a `success: true` for a tab that never appeared.
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.code).toBe('OPEN_URL_ERROR')
+    }
+    expect(mockWindowOpen).toHaveBeenCalledWith(URL, '_blank', 'noopener')
   })
 
-  it('web: swallows SecurityError from window.open (best-effort)', async () => {
+  it('web: returns OPEN_URL_ERROR when window.open throws (SecurityError)', async () => {
     mockIsTauriContext.mockReturnValue(false)
     mockWindowOpen.mockImplementation(() => {
       throw new Error('SecurityError: blocked')
@@ -80,7 +86,11 @@ describe('openerApi.openUrlWithSystemBrowser (web vs desktop branch)', () => {
 
     const result = await openerApi.openUrlWithSystemBrowser(URL)
 
-    expect(result).toEqual({ success: true, data: undefined })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.code).toBe('OPEN_URL_ERROR')
+      expect(result.error).toBe('SecurityError: blocked')
+    }
     expect(mockWindowOpen).toHaveBeenCalledWith(URL, '_blank', 'noopener')
   })
 

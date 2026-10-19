@@ -12,6 +12,7 @@ import {
   type WorkspaceCloseDialogsProps
 } from '@/layouts/workspace-layout/WorkspaceCloseDialogs'
 import { WorktreeCreateModalHost } from '@/layouts/workspace-layout/WorktreeCreateModalHost'
+import { useReportBugOpen, useReportBugStore } from '@/stores/report-bug-store'
 import { useSettingsModalView } from '@/stores/settings-modal-store'
 import { useThemePickerOpen } from '@/stores/theme-picker-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
@@ -33,6 +34,9 @@ const ProjectSettingsModal = lazy(() =>
 )
 const AppPreferencesModal = lazy(() =>
   import('@/pages/AppPreferences').then((m) => ({ default: m.AppPreferencesModal }))
+)
+const ReportBugDialog = lazy(() =>
+  import('@/components/bug-report/ReportBugDialog').then((m) => ({ default: m.ReportBugDialog }))
 )
 
 interface WorkspaceModalsProps extends WorkspaceCloseDialogsProps {
@@ -92,6 +96,7 @@ export function WorkspaceModals({
 }: WorkspaceModalsProps): React.JSX.Element {
   const settingsModalView = useSettingsModalView()
   const isThemePickerOpen = useThemePickerOpen()
+  const isReportBugOpen = useReportBugOpen()
   const { sshProfiles, handleSSHConnect } = ssh
   const {
     handleOpenSnapshotModal,
@@ -154,6 +159,7 @@ export function WorkspaceModals({
             onOpenCommandHistory={activeProjectId ? handleOpenCommandHistory : undefined}
             onOpenShortcutMenu={handleOpenShortcutMenu}
             onOpenThemePicker={handleOpenThemePicker}
+            onReportBug={() => useReportBugStore.getState().openReport()}
             onSSHConnect={handleSSHConnect}
             sshProfiles={sshProfiles.map((p) => ({
               id: p.id,
@@ -195,6 +201,15 @@ export function WorkspaceModals({
       {settingsModalView === 'app' && (
         <Suspense fallback={null}>
           <AppPreferencesModal />
+        </Suspense>
+      )}
+
+      {/* Report a Bug (spec-bug-report-dialog): one dialog for every
+          entry point — Rail buttons, command palette, mobile ⋯ sheets and
+          the Diagnostics grid all open the shared store. */}
+      {isReportBugOpen && (
+        <Suspense fallback={null}>
+          <ReportBugDialog />
         </Suspense>
       )}
 

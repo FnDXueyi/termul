@@ -45,10 +45,12 @@ import {
 import { useAcpStore } from '../index'
 import {
   activeWirePromptTurns,
+  bugReportCollectors,
   commitMessageCollectors,
   echoedWirePromptTurns,
   ephemeralSessionIds,
   persistSession,
+  rejectBugReportCollector,
   rejectCommitMessageCollector,
   rejectTerminalAssistCollector,
   terminalAssistCollectors
@@ -875,11 +877,14 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     const sessionId = e.sessionId
     const hadCommit = sessionId ? commitMessageCollectors.has(sessionId) : false
     const hadAssist = sessionId ? terminalAssistCollectors.has(sessionId) : false
+    const hadBugReport = sessionId ? bugReportCollectors.has(sessionId) : false
     if (hadCommit && sessionId)
       rejectCommitMessageCollector(sessionId, e.message || 'The ACP agent reported an error')
     if (hadAssist && sessionId)
       rejectTerminalAssistCollector(sessionId, e.message || 'The ACP agent reported an error')
-    if (hadCommit || hadAssist) return
+    if (hadBugReport && sessionId)
+      rejectBugReportCollector(sessionId, e.message || 'The ACP agent reported an error')
+    if (hadCommit || hadAssist || hadBugReport) return
     // The turn ends here (below) — a prompt still waiting to confirm must stop
     // resending; the host's `error`/`timeout` terminator follows.
     endPromptTrackingForAgentFailure(get(), e.agentId, sessionId)
@@ -952,11 +957,14 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     const sessionId = e.sessionId
     const hadCommit = sessionId ? commitMessageCollectors.has(sessionId) : false
     const hadAssist = sessionId ? terminalAssistCollectors.has(sessionId) : false
+    const hadBugReport = sessionId ? bugReportCollectors.has(sessionId) : false
     if (hadCommit && sessionId)
       rejectCommitMessageCollector(sessionId, e.message || 'The ACP agent crashed')
     if (hadAssist && sessionId)
       rejectTerminalAssistCollector(sessionId, e.message || 'The ACP agent crashed')
-    if (hadCommit || hadAssist) return
+    if (hadBugReport && sessionId)
+      rejectBugReportCollector(sessionId, e.message || 'The ACP agent crashed')
+    if (hadCommit || hadAssist || hadBugReport) return
     // A crashed agent can never complete an accepted prompt: stop waiting to
     // confirm / resending it (the host closes the turn with a `crashed`
     // terminator and the Retry path starts a new intent with a new id).
@@ -1036,6 +1044,11 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     for (const [sessionId, collector] of terminalAssistCollectors) {
       if (collector.agentId === e.agentId) {
         rejectTerminalAssistCollector(sessionId, 'The ACP agent disconnected')
+      }
+    }
+    for (const [sessionId, collector] of bugReportCollectors) {
+      if (collector.agentId === e.agentId) {
+        rejectBugReportCollector(sessionId, 'The ACP agent disconnected')
       }
     }
     // Flush coalesced updates so the disconnect reflects the final transcript state.

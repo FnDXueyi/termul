@@ -20,13 +20,20 @@ interface AttachmentPreviewGroupProps {
   attachments: PendingAttachment[]
   onRemove: (id: string) => void
   className?: string
+  /**
+   * Optional per-attachment action rendered inside each badge, before the
+   * remove control. The Report a Bug dialog uses it for the copy-image
+   * button; composers leave it unset.
+   */
+  attachmentActions?: (attachment: PendingAttachment) => React.ReactNode
 }
 
 /** Staged-attachment badges shown in a composer above the textarea. */
 export function AttachmentPreviewGroup({
   attachments,
   onRemove,
-  className
+  className,
+  attachmentActions
 }: AttachmentPreviewGroupProps): React.JSX.Element | null {
   const reduced = useReducedMotion() ?? false
 
@@ -79,6 +86,7 @@ export function AttachmentPreviewGroup({
                     <AttachmentInfo />
                   </>
                 )}
+                {attachmentActions?.(a)}
                 <AttachmentRemove label={`Remove ${ariaLabel}`} />
               </Attachment>
             </motion.div>

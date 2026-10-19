@@ -1,4 +1,4 @@
-import { Edit2, Search, SlidersHorizontal } from '@/components/icons'
+import { Bug, Edit2, Search, SlidersHorizontal } from '@/components/icons'
 import { RailColumnIcons } from '@/components/shell/RailColumnIcons'
 import { RailProjectStack } from '@/components/shell/RailProjectStack'
 import { RailToggleButton } from '@/components/shell/RailToggleButton'
@@ -9,6 +9,7 @@ import { useTopRowPlatform } from '@/components/shell/top-row-context'
 import { useTrafficLightInset } from '@/components/shell/traffic-light-inset'
 import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
 import { cn } from '@/lib/utils'
+import { useReportBugStore } from '@/stores/report-bug-store'
 import { useSettingsModalStore, useSettingsModalView } from '@/stores/settings-modal-store'
 import type { Project } from '@/types/project'
 
@@ -169,7 +170,9 @@ export function RailCollapsed({
         </div>
       </div>
 
-      {/* Settings stays pinned at the bottom. */}
+      {/* Settings and Report a bug stay pinned at the bottom, in the same
+          order the expanded rail footer renders them (Settings, then Report
+          a bug). */}
       <div className="mt-auto flex flex-col items-center gap-1">
         <RailButton
           label="Settings"
@@ -179,6 +182,13 @@ export function RailCollapsed({
           onClick={() => useSettingsModalStore.getState().openApp()}
         >
           <SlidersHorizontal size={16} />
+        </RailButton>
+        <RailButton
+          label="Report a bug"
+          aria-label="Report a bug"
+          onClick={() => useReportBugStore.getState().openReport()}
+        >
+          <Bug size={16} />
         </RailButton>
       </div>
     </div>

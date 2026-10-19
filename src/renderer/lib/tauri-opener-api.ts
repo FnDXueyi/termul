@@ -48,9 +48,11 @@ function createTauriOpenerApi(): OpenerApi {
 
     async openUrlWithSystemBrowser(url: string): Promise<IpcResult<void>> {
       if (!isTauriContext()) {
-        // Web/remote: open a new tab. A popup blocker may return null; that is
-        // not an error worth surfacing (best-effort facade). Swallow and report
-        // success so the caller (e.g. WhatsNewModal) doesn't show a broken UX.
+        // Web/remote: open a new tab. A popup blocker (or a SecurityError)
+        // makes `window.open` fail — report that honestly so callers like the
+        // bug-report fallback don't toast "issue opened" for a tab that never
+        // appeared. Callers that don't check the result (e.g. WhatsNewModal)
+        // keep their fire-and-forget UX.
         //
         // Scheme guard: only hand `http(s):`/`mailto:` URLs to `window.open`.
         // `javascript:`/`data:`/`file:` would execute script or navigate the
@@ -60,9 +62,22 @@ function createTauriOpenerApi(): OpenerApi {
           return { success: true, data: undefined }
         }
         try {
-          window.open(url, '_blank', 'noopener')
-        } catch {
-          // Swallow — SecurityError or popup blocker. Best-effort.
+          const opened = window.open(url, '_blank', 'noopener')
+          if (opened === null) {
+            return {
+              success: false,
+              error: 'The browser blocked the new tab (popup blocked)',
+              code: 'OPEN_URL_ERROR'
+            }
+          }
+        } catch (error) {
+          // SecurityError or a popup-blocker throw — same class of failure as
+          // the desktop `openUrl` rejection.
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+            code: 'OPEN_URL_ERROR'
+          }
         }
         return { success: true, data: undefined }
       }

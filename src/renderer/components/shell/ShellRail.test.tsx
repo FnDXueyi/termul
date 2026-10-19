@@ -284,7 +284,7 @@ describe('ShellRail', () => {
       expect(tooltip.parentElement).toHaveAttribute('data-side', 'bottom')
     })
 
-    it('has an icon-only footer: Settings at the left, Theme and Shortcuts at the right', () => {
+    it('has an icon-only footer: Settings and Report a bug at the left, Theme and Shortcuts at the right', () => {
       renderRail()
       const settings = screen.getByRole('button', { name: 'Settings' })
       expect(settings).toHaveClass('size-7')
@@ -296,7 +296,12 @@ describe('ShellRail', () => {
       const names = within(footer)
         .getAllByRole('button')
         .map((button) => button.getAttribute('aria-label'))
-      expect(names).toEqual(['Settings', 'Color themes', 'Open keyboard shortcuts menu'])
+      expect(names).toEqual([
+        'Settings',
+        'Report a bug',
+        'Color themes',
+        'Open keyboard shortcuts menu'
+      ])
       expect(
         within(footer).queryByRole('button', { name: 'Expand or collapse projects' })
       ).toBeNull()
@@ -410,7 +415,7 @@ describe('ShellRail', () => {
       useShellLayoutStore.setState({ railExpanded: false })
     })
 
-    it('shows only the icons: project stack, Column tabs, Search, Canvas, SSH, Settings', () => {
+    it('shows only the icons: project stack, Column tabs, Search, Canvas, SSH, Settings, Report a bug', () => {
       renderRail()
 
       const nav = screen.getByRole('navigation', { name: 'Projects' })
@@ -429,7 +434,9 @@ describe('ShellRail', () => {
         'Search',
         'Open canvas',
         'SSH hosts',
-        'Settings'
+        // Same relative order as the expanded footer: Settings, then Report a bug.
+        'Settings',
+        'Report a bug'
       ])
       expect(within(nav).queryByText('Projects')).not.toBeInTheDocument()
       expect(within(nav).queryByTestId('ssh-section')).not.toBeInTheDocument()
@@ -440,10 +447,10 @@ describe('ShellRail', () => {
       expect(band).toHaveClass('h-12', 'pt-2')
       expect(band).toHaveAttribute('data-tauri-drag-region')
       expect(within(band).getByTestId('rail-brand-swap')).toBeInTheDocument()
-      // Settings alone is pinned at the bottom.
+      // Settings + Report a bug are pinned at the bottom.
       const bottom = screen.getByRole('button', { name: 'Settings' }).parentElement as HTMLElement
       expect(bottom).toHaveClass('mt-auto')
-      expect(within(bottom).getAllByRole('button')).toHaveLength(1)
+      expect(within(bottom).getAllByRole('button')).toHaveLength(2)
     })
 
     it('puts the mark / toggle swap below the empty top band under the macOS traffic lights', () => {
