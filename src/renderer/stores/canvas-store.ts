@@ -121,8 +121,13 @@ export interface CanvasState {
   sessions: Record<string, CanvasSession>
   /** True when the project has a canvas session afterwards; false on a typed
    * failure (callers fall back); 'superseded' when a newer open or close
-   * took over the project while this one was in flight. */
-  openCanvas: (projectId: string, docPath: string) => Promise<boolean | 'superseded'>
+   * took over the project while this one was in flight. `showTab: false`
+   * mounts without opening or focusing the canvas tab. */
+  openCanvas: (
+    projectId: string,
+    docPath: string,
+    options?: { showTab?: boolean }
+  ) => Promise<boolean | 'superseded'>
   /** Unmount through the host's AD-31 sequence; the session ends only when
    * the host unmounted. `discard` is the user's choice to drop unsaved
    * changes after a failed save. */
@@ -585,11 +590,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
   return {
     sessions: {},
 
-    openCanvas: async (projectId, docPath) => {
+    openCanvas: async (projectId, docPath, options) => {
       if (!projectId || !docPath) return false
+      const showTab = (path: string): void => {
+        if (options?.showTab !== false) useWorkspaceStore.getState().addCanvasTab(projectId, path)
+      }
       const existing = get().sessions[projectId]
       if (existing && sameCanvasDoc(existing.docPath, docPath) && mountOf(existing.phase)) {
-        useWorkspaceStore.getState().addCanvasTab(projectId, existing.docPath)
+        showTab(existing.docPath)
         return true
       }
       if (existing && mountOf(existing.phase)) {
@@ -598,7 +606,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
           toast.error(`Could not close the open canvas: ${closed.error}`)
           return false
         }
-        return get().openCanvas(projectId, docPath)
+        return get().openCanvas(projectId, docPath, options)
       }
       const generation = nextLifecycleGeneration(projectId)
       const resuming = existing?.phase.kind === 'unloaded'
@@ -651,7 +659,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         toast.error(`Could not open the canvas: ${result.error}`)
         if (result.code === 'EVICTION_BLOCKED') {
           get().markUnloaded(projectId, 'blocked', result.error, docPath)
-          useWorkspaceStore.getState().addCanvasTab(projectId, docPath)
+          showTab(docPath)
         } else if (existing === undefined) {
           set((state) => {
             const { [projectId]: _dropped, ...rest } = state.sessions
@@ -674,7 +682,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
           }
         }
       }))
-      useWorkspaceStore.getState().addCanvasTab(projectId, docPath)
+      showTab(docPath)
       return true
     },
 
