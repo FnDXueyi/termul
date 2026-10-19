@@ -4,8 +4,10 @@
 //! The editor never touches the file system for an agent. `file.save` is
 //! Termul's own save, whatever path it names. An export with a `path` runs
 //! without it, so the bytes come back inline, and Termul writes them to that
-//! path only when it lies inside the project. Every other command or method
-//! that reads or writes a path is refused with `UNSUPPORTED_IN_KIOSK`.
+//! path only when it lies inside the project. The editor picks an export's
+//! format from the path's extension when none is given, so without the path
+//! Termul names the format itself. Every other command or method that reads
+//! or writes a path is refused with `UNSUPPORTED_IN_KIOSK`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -83,6 +85,7 @@ const COMMANDS: &[(&str, CommandPolicy)] = &[
 const METHODS: &[(&str, &[FileArg])] = &[("ui.render", PATH), ("ui.screenshot", PATH)];
 
 const EXECUTE: &str = "engine.execute";
+const EXPORT: &str = "file.export";
 const BATCH: &str = "command.batch";
 
 /// Route one call. `params` is the call's parsed params.
@@ -114,6 +117,13 @@ fn route_execute(execute: &Value) -> CanvasRoute {
                 let mut execute = execute.clone();
                 if let Some(params) = execute.get_mut("params").and_then(Value::as_object_mut) {
                     params.remove("path");
+                    let unnamed = params.get("format").and_then(Value::as_str).is_none();
+                    if command == EXPORT && unnamed {
+                        let Some(format) = export_format(path) else {
+                            return CanvasRoute::Refuse(unknown_format(path));
+                        };
+                        params.insert("format".to_string(), Value::from(format));
+                    }
                 }
                 CanvasRoute::ExportTo {
                     path: path.to_string(),
@@ -162,6 +172,31 @@ fn touches_files(args: &[FileArg], params: &Value) -> bool {
 
 fn string_param<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
     params.get(name).and_then(Value::as_str)
+}
+
+/// The format the editor would read from `path`'s extension (figcraft
+/// `ExportFormat::from_ext`, plus `fig` for the whole file).
+fn export_format(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "svg" => Some("svg"),
+        "webp" => Some("webp"),
+        "pdf" => Some("pdf"),
+        "fig" => Some("fig"),
+        _ => None,
+    }
+}
+
+fn unknown_format(path: &str) -> CanvasError {
+    CanvasError::new(
+        CanvasErrorCode::EngineError,
+        format!(
+            "export cannot tell the format of `{path}`: give it a png, jpg, svg, webp, pdf or \
+             fig extension, or pass `format`"
+        ),
+    )
 }
 
 fn unsupported(name: &str) -> CanvasError {
@@ -267,6 +302,40 @@ pub fn resolve_project_file(root: &Path, requested: &str) -> Result<ProjectFile,
         }),
         _ => Err(outside()),
     }
+}
+
+/// Write `bytes` to `requested` inside `root`, checking the path again right
+/// before the write: a link planted since an earlier check (while the editor
+/// exported) must not lead the write out of the project. The write goes
+/// through the parent as it resolves after its folders exist.
+pub fn write_project_file(
+    root: &Path,
+    requested: &str,
+    bytes: &[u8],
+) -> Result<ProjectFile, CanvasError> {
+    let file = resolve_project_file(root, requested)?;
+    let failed = |error: std::io::Error| {
+        CanvasError::new(
+            CanvasErrorCode::EngineError,
+            format!("could not write `{}`: {error}", file.relative),
+        )
+    };
+    let (Some(parent), Some(name)) = (file.absolute.parent(), file.absolute.file_name()) else {
+        return Err(failed(std::io::Error::other("the path names no file")));
+    };
+    std::fs::create_dir_all(parent).map_err(failed)?;
+    let resolved_parent = std::fs::canonicalize(parent).map_err(failed)?;
+    let resolved_root = std::fs::canonicalize(root).map_err(failed)?;
+    if !resolved_parent.starts_with(&resolved_root) {
+        return Err(CanvasError::new(
+            CanvasErrorCode::UnsupportedInKiosk,
+            format!(
+                "export writes only to a relative path inside the project; `{requested}` is not one"
+            ),
+        ));
+    }
+    crate::acp::atomic_file::replace(&resolved_parent.join(name), bytes).map_err(failed)?;
+    Ok(file)
 }
 
 #[cfg(test)]

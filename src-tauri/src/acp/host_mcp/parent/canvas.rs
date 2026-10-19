@@ -91,7 +91,9 @@ impl HostPlanServer {
     }
 
     /// Export inline, then write the bytes to `path` inside the project. The
-    /// reply is upstream's export-to-path result with the relative path.
+    /// path is checked before the editor runs, so a bad one costs no export,
+    /// and again at the write. The reply is upstream's export-to-path result
+    /// with the relative path.
     async fn export_to(
         &self,
         tool: &str,
@@ -109,13 +111,16 @@ impl HostPlanServer {
             .await?;
         let (reply, bytes) = written_export(&result, &file)?;
         let size = bytes.len();
-        let target = file.absolute.clone();
-        tokio::task::spawn_blocking(move || crate::acp::atomic_file::replace(&target, &bytes))
-            .await
-            .map_err(|error| engine_error(format!("the export write stopped: {error}")))?
-            .map_err(|error| {
-                engine_error(format!("could not write `{}`: {error}", file.relative))
-            })?;
+        let root = scope.root.clone();
+        let requested = path.to_string();
+        tokio::task::spawn_blocking(move || {
+            canvas_policy::write_project_file(&root, &requested, &bytes)
+        })
+        .await
+        .map_err(|error| engine_error(format!("the export write stopped: {error}")))?
+        .inspect_err(|_| {
+            log::info!("[canvas-gateway] {tool} export write refused for project {project_id}");
+        })?;
         log::info!(
             "[canvas-gateway] {tool} wrote export {} ({size} bytes) for project {project_id}",
             file.relative
