@@ -17,6 +17,14 @@ git -C "$REPO" clean -fdq -- goal-routine-runs/_automation
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$RUN_ID.log"
 
+# Single-flight lock: shared with the hourly fast lane (same lock file).
+exec 9>"$REPO/.routine-lock"
+if ! flock -n 9; then
+  echo "$(date -u +%FT%TZ) another routine run holds the lock; skipping" \
+    >> "$REPO/goal-routine-runs/_automation/skips.log"
+  exit 0
+fi
+
 # Kill anything a previous run left behind (a leaked server pins a core: #1391).
 pkill -9 -f 'termul-nightly-audit-.*termul-server' 2>/dev/null || true
 

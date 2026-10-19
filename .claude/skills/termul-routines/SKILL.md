@@ -120,6 +120,11 @@ Findings file as issues per Pass 3 rules. Two failure classes deserve a second l
 
 `scripts/routine/run-routine.sh` runs this whole skill headless: omp in print mode, `sepintu/zai/glm-5.3`, thinking high, auto-approve, in a dedicated clone at `/root/termul-routine-automation` pinned to the internal `chore/agent-routine-skill` branch. Cron fires it daily at 18:30 UTC (01:30 Jakarta), after the 17:00 UTC nightly build, so the QA target is the finished nightly of that Jakarta date. The runner syncs the clone, kills any leaked audit servers first (a leaked agent pins a core, see `#1391`), and writes logs to `goal-routine-runs/_automation/<run-id>.log`, keeping the last 14. Run artifacts land under `goal-routine-runs/` as in interactive runs.
 
+Two schedules share one lock (`/root/termul-routine-automation/.routine-lock`, `flock -n`), so runs never overlap:
+
+- **Hourly fast lane** (`scripts/routine/run-fast-lane.sh`, cron at minute 7): new-issue labels only (no comments, hourly repeats would spam) plus AT MOST ONE bug-fix PR to dev per run, 45-minute bound. A crashed run re-scans next hour, safe because label mutations are idempotent.
+- **Daily full routine** (`scripts/routine/run-routine.sh`, 18:30 UTC): everything in this skill, Pass 3 and Pass 4 included, up to 3 Pass 2 PRs.
+
 Unattended Pass 2 (issue → PR), explicit operator policy, 2026-10-19:
 
 - **Auto-open PRs nightly.** When an issue is `dev-ready`, the unattended run builds the fix, runs the full local gate, and OPENS the PR to `dev` without waiting for human pre-approval. This is an operator-authorized waiver of AGENTS.md's pre-submission approval for unattended routine runs only; CI, CodeRabbit, and the merge decision remain the safety net. Branch from `origin/dev`, never from the routine branch, and push a feature branch named `routine/<issue>-<slug>`.
