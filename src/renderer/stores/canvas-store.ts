@@ -169,6 +169,9 @@ export interface CanvasState {
 }
 
 const bridges = new Map<string, { mountSeq: number; bridge: CanvasBridge }>()
+/** Dirty notifications forwarded per project; a retry runs only while no
+ * newer one went out. */
+const dirtyNotices = new Map<string, number>()
 const lifecycleGenerations = new Map<string, number>()
 const savesInFlight = new Map<string, number>()
 
@@ -445,13 +448,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
   }
 
   /** The host owns the debounce: this resolves once it settles, and a later
-   * notification supersedes an earlier one. */
+   * notification supersedes an earlier one. A notification that did not
+   * reach the host shows as a save error and is sent again once, after the
+   * autosave delay, unless a newer one went out meanwhile. */
   const forwardDirty = async (
     projectId: string,
     mountSeq: number,
     dirty: boolean,
-    contentVersion: string
+    contentVersion: string,
+    retry = true
   ): Promise<void> => {
+    const notice = (dirtyNotices.get(projectId) ?? 0) + 1
+    dirtyNotices.set(projectId, notice)
     const result = await canvasApi.dirtyChanged(projectId, mountSeq, dirty, contentVersion)
     if (!isLiveMount(projectId, mountSeq)) return
     if (!result.success && result.code === 'CANVAS_CLOSED') {
@@ -464,6 +472,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         'dirtyChanged',
         `canvas dirty notification failed for project ${projectId}: ${result.code}`
       )
+      patchSession(projectId, { saveError: `Autosave could not reach Termul: ${result.error}` })
+      if (retry) {
+        setTimeout(() => {
+          const now = get().sessions[projectId]
+          if (dirtyNotices.get(projectId) !== notice || now?.phase.kind !== 'ready') return
+          if (now.contentVersion === null) return
+          void forwardDirty(projectId, mountSeq, now.dirty, now.contentVersion, false)
+        }, useAppSettingsStore.getState().settings.canvasAutosaveMs)
+      }
       return
     }
     const outcome = result.data

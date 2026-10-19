@@ -725,6 +725,30 @@ describe('persistence', () => {
     })
   })
 
+  it('a failed dirty notification shows a save error and is retried on the next tick', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    try {
+      const editor = await mountReady()
+      dirtyChanged
+        .mockResolvedValueOnce({ success: false, error: 'offline', code: 'NETWORK_ERROR' })
+        .mockResolvedValueOnce(
+          ok({ kind: 'idle', view: view({ dirty: true, contentVersion: '4' }) })
+        )
+      editor.dirty(true, '4')
+      await flush()
+      expect(session()?.saveError).toContain('offline')
+      expect(dirtyChanged).toHaveBeenCalledTimes(1)
+
+      vi.advanceTimersByTime(1500)
+      await flush()
+      expect(dirtyChanged).toHaveBeenCalledTimes(2)
+      expect(dirtyChanged).toHaveBeenLastCalledWith(PROJECT, 41, true, '4')
+      expect(session()?.saveError).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('CANVAS_CLOSED from the host on a mount this window holds shows the canvas closed', async () => {
     const editor = await mountReady()
     dirtyChanged.mockResolvedValueOnce({
