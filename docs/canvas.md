@@ -34,7 +34,7 @@ A canvas document is a `.figcraft` file. Opening the canvas picks the project ro
 - **Cap and eviction.** At most `canvas.max_mounted` canvases stay mounted (default 2, clamped to 1..16). Opening one more saves and unloads the least recently active one. A failed save blocks the eviction.
 - **One lease per document.** Exactly one renderer (a desktop window or a web tab) holds a document's mount. A newer opener takes the lease, and the previous holder unmounts and shows `CANVAS_OPEN_ELSEWHERE` with a take-back action. A dropped connection keeps the lease for `canvas.lease_grace_ms` (default 5000) so a reload does not lose it. An agent call that arrives in that window waits for the holder to come back, up to the call timeout, and answers `CANVAS_CLOSED` once the grace runs out.
 - **Close sequence.** Every unmount runs quiesce, save, verify, unmount. If the save fails the user is asked and nothing is discarded silently.
-- **Crash recovery.** An `event.crashed`, or `canvas.crash_timeouts` consecutive timed-out calls (default 3), remounts the editor from the last saved bytes.
+- **Crash recovery.** An `event.crashed`, or `canvas.crash_timeouts` consecutive timed-out calls (default 3), remounts the editor from the last saved bytes. The editor runs one call at a time, so a call that times out while an earlier call is still inside its own, longer wait (a large export) is not counted.
 - **Disk changes.** Termul's file watcher owns detection. A clean editor reloads silently. A dirty editor suppresses autosave and the user chooses keep mine, take disk, or save a copy.
 
 ## Settings
@@ -47,7 +47,7 @@ The renderer sends these with each canvas open, and the host clamps them.
 | `canvas.lease_grace_ms` | 5000 | How long a window keeps its lease after its connection drops |
 | `canvas.max_mounted` | 2 | Mounted canvases kept at once |
 | `canvas.crash_timeouts` | 3 | Consecutive timed-out calls that mark the editor crashed |
-| `canvas.call_timeout_ms` | 10000 | Gateway timeout for one agent call (`CANVAS_TIMEOUT`) |
+| `canvas.call_timeout_ms` | 10000 | Gateway timeout for one agent call (`CANVAS_TIMEOUT`). Renders wait longer, see [Agents](#agents) |
 
 ## Access control
 
@@ -63,6 +63,8 @@ The iframe cannot send an `Authorization` header, so the bundle has its own cred
 ## Agents
 
 Canvas tools live in the per-session host `termul` MCP server (`acp/host_mcp`). The gateway resolves the session's project, forwards each call to the renderer that holds the mount's lease, and answers from the engine. It caches no document or selection state. Tool names are figcraft's own. `save_file` is Termul's own save of the project document. A project with no mount answers `CANVAS_CLOSED`, a closing one `CANVAS_CLOSING`, and a stalled editor `CANVAS_TIMEOUT`. No MCP registry entry is persisted for the canvas, and no `/canvas/mcp` route exists. On load the renderer drops any `canvas-mcp-*` entries an older build persisted.
+
+Calls that render pixels (a png, jpg or webp `export`, and the render behind `screenshot`) wait `canvas.call_timeout_ms` plus 2 s per output megapixel, at most 180 s. The output size is the union of the target layers' bounds times the scale, read from the editor with `node.get` or `document.inspect` lookups that never count toward the crash timeouts. When the bounds cannot be read the render gets the full 180 s. An export with a `path` that still times out keeps running in the editor, and Termul writes its file when it finishes, within 10 minutes, unless a newer export to the same path started first. The engine cannot be interrupted, so a call that timed out may still finish. The `CANVAS_TIMEOUT` advice depends on the tool: a read (`get_node`, `inspect_document`, `list_commands`, `inspect_ui`) may be retried once, an `export` or `screenshot` should use a smaller `scale` or `size`, and any other call should re-read the document before redoing anything, since a blind retry can apply a change twice. Engine-side cancellation and rejecting `scale` above 64 (the engine clamps it) are fork follow-ups.
 
 Every answered agent call also shows on the canvas as that session's cursor (`acp/host_mcp/presence`). The host derives what the call touched from the call and its result, looks up the last node's bounds with at most one `node.get` or `document.inspect`, and sends the editor `host.guestCursor`, `host.guestFlash` and, when the turn ends or the session closes, `host.guestHide`. The cursor carries the agent's display name and a colour fixed by the session id. Moves are paced to one per 120 ms per session. This work starts after the agent's reply and never delays or fails it. Its lookups never count as canvas activity or toward the crash timeouts. Nothing is sent when no editor is connected.
 
