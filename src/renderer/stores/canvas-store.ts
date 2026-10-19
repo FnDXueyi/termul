@@ -194,6 +194,16 @@ function isStaleLifecycle(projectId: string, generation: number): boolean {
   return lifecycleGenerations.get(projectId) !== generation
 }
 
+/** The host answered `CANVAS_CLOSED` for a mount this window still showed:
+ * it was dropped without this window being told. */
+const HOST_DROPPED_PHASE: CanvasPhase = {
+  kind: 'failed',
+  code: 'CANVAS_CLOSED',
+  mountSeq: null,
+  message:
+    'Termul closed this canvas, so changes made here since were not saved. Open it again to continue from its last save.'
+}
+
 /** The phase a session moves to when this window loses its mount. */
 const LEASE_LOSS_PHASE: Record<CanvasLeaseLoss, CanvasPhase> = {
   elsewhere: { kind: 'elsewhere' },
@@ -291,6 +301,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       const { [projectId]: _closed, ...rest } = state.sessions
       return { sessions: rest }
     })
+  }
+
+  /** The host answered `CANVAS_CLOSED` for `mountSeq`: if this window still
+   * shows it, say so instead of letting edits go unsaved. */
+  const hostDropped = (projectId: string, mountSeq: number): void => {
+    if (!isLiveMount(projectId, mountSeq)) return
+    logCanvas('warn', 'hostDropped', `the host no longer holds the canvas of project ${projectId}`)
+    releaseMount(projectId)
+    patchSession(projectId, { phase: HOST_DROPPED_PHASE, ...CLEAN_PROJECTION })
   }
 
   const failMount = (
@@ -396,6 +415,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       if (!snapshot.ok) return failed(`${snapshot.error.code} ${snapshot.error.message}`)
       const written = await canvasApi.writeSnapshot(projectId, mountSeq, snapshot.result)
       if (!isLiveMount(projectId, mountSeq)) return false
+      if (!written.success && written.code === 'CANVAS_CLOSED') {
+        hostDropped(projectId, mountSeq)
+        return false
+      }
       if (!written.success) return failed(`${written.code} ${written.error}`)
       patchSession(projectId, projectionOf(written.data.view))
       const { markSaved } = written.data
@@ -431,6 +454,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
   ): Promise<void> => {
     const result = await canvasApi.dirtyChanged(projectId, mountSeq, dirty, contentVersion)
     if (!isLiveMount(projectId, mountSeq)) return
+    if (!result.success && result.code === 'CANVAS_CLOSED') {
+      hostDropped(projectId, mountSeq)
+      return
+    }
     if (!result.success) {
       logCanvas(
         'warn',

@@ -725,6 +725,26 @@ describe('persistence', () => {
     })
   })
 
+  it('CANVAS_CLOSED from the host on a mount this window holds shows the canvas closed', async () => {
+    const editor = await mountReady()
+    dirtyChanged.mockResolvedValueOnce({
+      success: false,
+      error: 'the canvas is not mounted',
+      code: 'CANVAS_CLOSED'
+    })
+    editor.dirty(true, '4')
+    await flush()
+    expect(session()?.phase).toMatchObject({
+      kind: 'failed',
+      code: 'CANVAS_CLOSED',
+      mountSeq: null
+    })
+    await expect(editor.bridge.call('document.inspect')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CANVAS_CLOSED' }
+    })
+  })
+
   it('a superseded notification changes nothing and takes no snapshot', async () => {
     const editor = await mountReady()
     dirtyChanged.mockResolvedValueOnce(ok({ kind: 'superseded' }))
