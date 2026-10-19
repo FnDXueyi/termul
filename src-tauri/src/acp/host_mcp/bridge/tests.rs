@@ -478,7 +478,10 @@ fn an_export_that_outlasts_its_wait_is_still_written_when_it_finishes() {
     assert!(message.contains("smaller `scale`"), "{message}");
     assert!(!message.contains("retry once"), "{message}");
     let target = harness.cwd.join("out/big.png");
-    assert!(!target.exists(), "nothing is written before the editor finishes");
+    assert!(
+        !target.exists(),
+        "nothing is written before the editor finishes"
+    );
 
     let frame = slow_export(&seen);
     assert!(harness.router().reply(

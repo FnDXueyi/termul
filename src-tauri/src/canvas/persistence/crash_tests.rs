@@ -336,10 +336,19 @@ async fn calls_queued_behind_a_render_still_inside_its_wait_are_not_a_crash() {
     let mounts = Arc::clone(&editor.mounts);
     let render = tokio::spawn(async move {
         mounts
-            .call(PROJECT, "host.renderPng", "{}".into(), Duration::from_secs(30))
+            .call(
+                PROJECT,
+                "host.renderPng",
+                "{}".into(),
+                Duration::from_secs(30),
+            )
             .await
     });
-    editor.frames.recv().await.expect("the render reached the renderer");
+    editor
+        .frames
+        .recv()
+        .await
+        .expect("the render reached the renderer");
 
     for _ in 0..4 {
         editor.time_out().await;
@@ -355,10 +364,19 @@ async fn once_a_render_outlasts_its_own_wait_timeouts_count_again() {
     let mounts = Arc::clone(&editor.mounts);
     let render = tokio::spawn(async move {
         mounts
-            .call(PROJECT, "host.renderPng", "{}".into(), Duration::from_millis(300))
+            .call(
+                PROJECT,
+                "host.renderPng",
+                "{}".into(),
+                Duration::from_millis(300),
+            )
             .await
     });
-    editor.frames.recv().await.expect("the render reached the renderer");
+    editor
+        .frames
+        .recv()
+        .await
+        .expect("the render reached the renderer");
     editor.time_out().await;
     assert_eq!(
         render.await.unwrap().unwrap_err().code,
