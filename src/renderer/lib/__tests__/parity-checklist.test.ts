@@ -1652,7 +1652,7 @@ describe('Parity Checklist Automation', () => {
         /canvas: removeTab/
       )
       expect(readFileSync(join(RENDERER, 'stores', 'project-store.ts'), 'utf-8')).toMatch(
-        /unmountCanvases\(\[id\]\)/
+        /unmountCanvasesFor\(\[id\]\)/
       )
       expect(
         readFileSync(join(RENDERER, 'layouts', 'workspace-layout', 'use-app-close.ts'), 'utf-8')
