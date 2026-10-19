@@ -3,8 +3,10 @@
 //! nodes (agent cursor contract; the editor draws, the host decides).
 //!
 //! Nothing here can slow or fail the agent: the call's reply is final before
-//! [`Presence::after_call`] runs, the work then happens on its own task, and a
-//! failed lookup or notice is only logged at debug. Each session is one guest
+//! [`Presence::after_call`] runs, which only hands the call to its own task
+//! (reading the result, the lookups and the notices all happen there, and a
+//! result past [`RESULT_PARSE_LIMIT`] is not read at all), and a failed
+//! lookup or notice is only logged at debug. Each session is one guest
 //! (id = ACP session id, the agent's display name, a palette colour by hash)
 //! whose moves are paced to one per [`MOVE_EVERY`]; the latest activity wins.
 //! The host keeps no document state, only each guest's last target (AD-17).
@@ -44,6 +46,10 @@ pub const PALETTE: [&str; 8] = [
 ];
 
 const UNNAMED_AGENT: &str = "Agent";
+
+/// The longest call result presence reads ids and bounds from; a longer one
+/// (a deep `inspect_document`) shows what the params name only.
+pub const RESULT_PARSE_LIMIT: usize = 1024 * 1024;
 
 /// The guest colour of `session_id` (FNV-1a over its bytes).
 #[must_use]
@@ -237,8 +243,14 @@ impl Presence {
         }
     }
 
+    /// `agent_id` exited: its name goes too.
+    pub fn forget_agent(&self, agent_id: &str) {
+        self.names.lock().remove(agent_id);
+    }
+
     /// An agent call `method(params) -> result` from `tool` was answered.
-    /// Queues what it shows; returns at once. Needs a tokio runtime.
+    /// Hands it to a task of its own and returns at once, so the reply never
+    /// waits for the result to be read. Needs a tokio runtime.
     pub fn after_call(
         self: &Arc<Self>,
         origin: CallOrigin<'_>,
@@ -250,23 +262,42 @@ impl Presence {
         if self.mounts.holder_of(origin.project_id).is_none() {
             return;
         }
-        let Some(activity) = derive_activity(tool, method, params, result) else {
-            return;
-        };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             log::debug!("[canvas-presence] {tool} {method}: no runtime, nothing shown");
             return;
         };
-        let name = self
-            .names
-            .lock()
-            .get(origin.agent_id)
-            .cloned()
-            .unwrap_or_else(|| UNNAMED_AGENT.to_string());
-        let started = self.book.lock().offer(origin, &name, activity);
-        if let Some(epoch) = started {
-            runtime.spawn(Arc::clone(self).drain(origin.session_id.to_string(), epoch));
-        }
+        let this = Arc::clone(self);
+        let (session_id, agent_id, project_id) = (
+            origin.session_id.to_string(),
+            origin.agent_id.to_string(),
+            origin.project_id.to_string(),
+        );
+        let (tool, method, params) = (tool.to_string(), method.to_string(), params.clone());
+        let result = if result.len() <= RESULT_PARSE_LIMIT {
+            result.to_string()
+        } else {
+            String::new()
+        };
+        runtime.spawn(async move {
+            let Some(activity) = derive_activity(&tool, &method, &params, &result) else {
+                return;
+            };
+            let origin = CallOrigin {
+                session_id: &session_id,
+                agent_id: &agent_id,
+                project_id: &project_id,
+            };
+            let name = this
+                .names
+                .lock()
+                .get(origin.agent_id)
+                .cloned()
+                .unwrap_or_else(|| UNNAMED_AGENT.to_string());
+            let started = this.book.lock().offer(origin, &name, activity);
+            if let Some(epoch) = started {
+                this.drain(session_id, epoch).await;
+            }
+        });
     }
 
     /// The session's turn ended or it closed: its guest fades out.

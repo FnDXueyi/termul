@@ -128,6 +128,7 @@ pub(super) fn run_agent(
         reaped.store(true, Ordering::Release);
         map.remove(&agent_id);
     }
+    host_plan_server.forget_agent(&agent_id.0);
     // Only surface lifecycle events for an agent the renderer actually saw.
     // A kill, reap or crash is announced to every sink with its reason; only
     // process shutdown (`kill_all`) stays silent.

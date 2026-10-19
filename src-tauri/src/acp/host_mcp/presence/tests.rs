@@ -480,3 +480,56 @@ fn the_guest_fades_when_the_turn_ends_and_when_the_session_closes() {
     server.unregister_session("sess-1");
     assert_eq!(until(GUEST_HIDE), json!({ "id": "sess-1" }));
 }
+
+#[tokio::test]
+async fn the_agents_reply_goes_back_before_presence_reads_the_result() {
+    let (_router, presence, _frames) = editor(|_| None);
+    presence.after_call(
+        origin(),
+        "create_node",
+        EXECUTE,
+        &json!({ "command": "node.create", "params": { "type": "rectangle" } }),
+        r#"{"id":7}"#,
+    );
+    assert!(
+        presence.book.lock().guests.is_empty(),
+        "nothing is derived on the caller's path"
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        presence.book.lock().guests.contains_key(SESSION),
+        "the activity is derived once the reply has gone"
+    );
+}
+
+#[tokio::test]
+async fn a_result_past_the_parse_limit_is_not_read() {
+    let (_router, presence, _frames) = editor(|_| None);
+    let huge = format!(
+        r#"{{"id":7,"pad":"{}"}}"#,
+        "x".repeat(super::RESULT_PARSE_LIMIT)
+    );
+    presence.after_call(
+        origin(),
+        "create_node",
+        EXECUTE,
+        &json!({ "command": "node.create", "params": { "type": "rectangle" } }),
+        &huge,
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        presence.book.lock().guests.is_empty(),
+        "the id lived only in the result, which was too large to read"
+    );
+}
+
+#[test]
+fn an_agent_that_exits_leaves_no_name_behind() {
+    let presence = Presence::new(Arc::new(CanvasPersistence::default()));
+    presence.name_agent("agent-1", "opencode");
+    presence.name_agent("agent-2", "claude");
+    presence.forget_agent("agent-1");
+    let names = presence.names.lock();
+    assert_eq!(names.len(), 1);
+    assert!(names.contains_key("agent-2"));
+}
