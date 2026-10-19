@@ -254,9 +254,9 @@ async fn describe_browser_tool(config: &ChildConfig) -> Option<DescribedTool> {
 }
 
 /// The static host tools. `get_info` lives in its own `ServerHandler`
-/// block below so it can attach `TERMUL_CHAT_INSTRUCTIONS` to the
+/// block below so it can attach `session_instructions()` to the
 /// `initialize` result — the channel that advertises the chat renderer's
-/// markdown image + open-in-editor affordances to the agent.
+/// markdown affordances and the design canvas to the agent.
 #[tool_router]
 impl TermulPlanServer {
     #[tool(
