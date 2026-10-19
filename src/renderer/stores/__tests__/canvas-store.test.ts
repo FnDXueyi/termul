@@ -257,6 +257,20 @@ describe('open and close', () => {
     ])
   })
 
+  it('the same document under another spelling of its path keeps the mount', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    await expect(
+      useCanvasStore.getState().openCanvas(PROJECT, 'C:\\proj/design.figcraft')
+    ).resolves.toBe(true)
+    await expect(
+      useCanvasStore.getState().openCanvas(PROJECT, 'c:\\proj\\design.figcraft')
+    ).resolves.toBe(true)
+    expect(close).not.toHaveBeenCalled()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(currentMount().mountSeq).toBe(41)
+  })
+
   it('a repeat open of the mounted doc keeps the mount; another doc remounts', async () => {
     open.mockResolvedValueOnce(openInfo())
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)

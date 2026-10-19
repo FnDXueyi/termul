@@ -68,6 +68,7 @@ import {
   type CanvasBridgeReply,
   type JsonText
 } from '@/lib/canvas-bridge'
+import { sameCanvasDoc } from '@/lib/canvas-doc'
 import { readCanvasThemeTokens } from '@/lib/canvas-theme'
 import { logFrontendError } from '@/lib/log-api'
 import { basename } from '@/lib/path-basename'
@@ -540,8 +541,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     openCanvas: async (projectId, docPath) => {
       if (!projectId || !docPath) return false
       const existing = get().sessions[projectId]
-      if (existing && existing.docPath === docPath && mountOf(existing.phase)) {
-        useWorkspaceStore.getState().addCanvasTab(projectId, docPath)
+      if (existing && sameCanvasDoc(existing.docPath, docPath) && mountOf(existing.phase)) {
+        useWorkspaceStore.getState().addCanvasTab(projectId, existing.docPath)
         return true
       }
       if (existing && mountOf(existing.phase)) {

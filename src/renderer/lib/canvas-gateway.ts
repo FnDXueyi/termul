@@ -25,6 +25,7 @@ import {
   bridgeFailure,
   type CanvasBridgeReply
 } from '@/lib/canvas-bridge'
+import { comparablePath, plainPath } from '@/lib/canvas-doc'
 import { type CanvasSession, useCanvasStore } from '@/stores/canvas-store'
 import { useProjectStore } from '@/stores/project-store'
 
@@ -36,15 +37,6 @@ function mountedSeqOf(session: CanvasSession | undefined): number | null {
   return phase?.kind === 'loading' || phase?.kind === 'ready' ? phase.mount.mountSeq : null
 }
 
-/** `path` with forward slashes and without a Windows verbatim prefix:
- * `\\?\D:\p` is `D:/p` and `\\?\UNC\srv\share` is `//srv/share`. */
-function plainPath(path: string): string {
-  return path
-    .replace(/\\/g, '/')
-    .replace(/^\/\/\?\/UNC\//i, '//')
-    .replace(/^\/\/\?\//, '')
-}
-
 /** `docPath` relative to `root` with forward slashes; the absolute path when
  * the document is not under the root. Drive-letter roots compare
  * case-insensitively, as Windows paths do. */
@@ -52,8 +44,7 @@ export function projectRelativePath(docPath: string, root: string | undefined): 
   const doc = plainPath(docPath)
   if (!root) return doc
   const prefix = `${plainPath(root).replace(/\/+$/, '')}/`
-  const fold = (path: string): string => (/^[A-Za-z]:/.test(path) ? path.toLowerCase() : path)
-  return fold(doc).startsWith(fold(prefix)) ? doc.slice(prefix.length) : doc
+  return comparablePath(doc).startsWith(comparablePath(prefix)) ? doc.slice(prefix.length) : doc
 }
 
 function hostRemounted(projectId: string, params: string): CanvasBridgeReply {
