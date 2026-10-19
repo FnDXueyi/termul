@@ -23,6 +23,7 @@
 pub mod bridge;
 pub mod canvas;
 pub mod canvas_policy;
+pub mod canvas_skill;
 pub mod canvas_tools;
 pub mod child;
 pub mod parent;
