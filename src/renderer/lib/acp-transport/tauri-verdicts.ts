@@ -19,6 +19,8 @@
  *   `ACP_PROVIDER_REQUEST_REJECTED:` → `provider_quota_exceeded` /
  *   `provider_session_limit` / `provider_request_rejected` (the upstream
  *   provider refused the call)
+ * - `ACP_CLAUDE_ACCOUNT_SIGNED_OUT:` → `claude_account_signed_out` (the Claude
+ *   Account is not signed in)
  *
  * The prefix is stripped from the message the user reads. Anything else is
  * returned untouched.
@@ -55,7 +57,8 @@ const VERDICT_PREFIXES: ReadonlyArray<readonly [prefix: string, code: string]> =
   ['command_accepted', COMMAND_ACCEPTED_CODE],
   ['precondition_failed', PRECONDITION_FAILED_CODE],
   ...DEFINITE_SPAWN_REJECTIONS.map(([code, prefix]) => [prefix, code] as const),
-  ...PROVIDER_ERROR_PREFIXES.map(([code, prefix]) => [prefix, code] as const)
+  ...PROVIDER_ERROR_PREFIXES.map(([code, prefix]) => [prefix, code] as const),
+  ['ACP_CLAUDE_ACCOUNT_SIGNED_OUT', WS_ERROR_CODES.CLAUDE_ACCOUNT_SIGNED_OUT]
 ]
 
 /** Map a rejected Tauri `invoke` value to a typed error when it is a ledger verdict. */

@@ -398,13 +398,9 @@ fn main() -> ExitCode {
         ));
         pty.set_max_terminals_per_project(cfg.max_terminals_per_project);
 
-        // OpenPencil canvas mode (spec-openpencil-canvas-mode): the
-        // standalone server owns its own canvas daemon pool — NEVER shared
-        // with a desktop host on the same machine. `web::serve` joins its
-        // shutdown (stdin-EOF → kill) in the serve cleanup.
-        let canvas_pool = Some(Arc::new(
-            termul_manager_lib::canvas::pool::CanvasDaemonPool::real(),
-        ));
+        // The `/canvas/<id>/` figcraft bundle route rides the same web router,
+        // same-origin; there is no separate listener to start here.
+        termul_manager_lib::canvas::static_server::log_bundle_status();
         // Opt-in self-update loop (default off): only runs when the operator set
         // TERMUL_SERVER_UPDATE_ENABLED=true + TERMUL_SERVER_UPDATE_CHANNEL. A bad
         // signature keeps the current binary running (verify-before-swap), so an
@@ -424,7 +420,6 @@ fn main() -> ExitCode {
             acp_install,
             store,
             web_auth,
-            canvas_pool,
         )
         .await
         {

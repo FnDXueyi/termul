@@ -275,6 +275,19 @@ jobs:
         shell: bash
         run: test -f dist-web/index.html && test -s dist-web/index.html
 
+      # The figcraft canvas bundle is embedded alongside dist-web/ (spine
+      # AD-24): fetched by the pin in canvas/figcraft.pin, sha256 verified, and
+      # unpacked to canvas/bundle/ before the cargo build.
+      - name: Check figcraft pin
+        run: bun scripts/canvas/check-figcraft-pin.mjs
+
+      - name: Fetch and verify figcraft bundle (canvas/bundle/)
+        run: bun scripts/canvas/fetch-figcraft-bundle.mjs
+
+      - name: Assert canvas/bundle/index.html exists
+        shell: bash
+        run: test -f canvas/bundle/index.html && test -s canvas/bundle/index.html
+
       # Tauri ignores the stapler's exit status, so a transient CloudKit failure
       # (macos-15-intel has dropped the connection with NSURLErrorDomain -1005)
       # ships an unstapled .app inside the DMG and updater archive (#1388).
@@ -553,6 +566,15 @@ jobs:
 
       - name: Assert dist-web/index.html exists
         run: test -f dist-web/index.html && test -s dist-web/index.html
+
+      - name: Check figcraft pin
+        run: bun scripts/canvas/check-figcraft-pin.mjs
+
+      - name: Fetch and verify figcraft bundle (canvas/bundle/)
+        run: bun scripts/canvas/fetch-figcraft-bundle.mjs
+
+      - name: Assert canvas/bundle/index.html exists
+        run: test -f canvas/bundle/index.html && test -s canvas/bundle/index.html
 
       - name: Build termul-server (linux-${{ matrix.arch }} release)
         working-directory: src-tauri

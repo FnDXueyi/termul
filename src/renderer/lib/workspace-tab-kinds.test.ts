@@ -23,7 +23,7 @@ const SAMPLE_TABS: Record<WorkspaceTab['type'], WorkspaceTab> = {
     commit: 'e44b917'.padEnd(40, '0'),
     path: 'src/a.ts'
   },
-  canvas: { type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.op' }
+  canvas: { type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.figcraft' }
 }
 
 const kinds = Object.keys(WORKSPACE_TAB_KIND_TRAITS) as WorkspaceTab['type'][]

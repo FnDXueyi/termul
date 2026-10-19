@@ -1,242 +1,309 @@
-//! Canvas Tauri commands (OpenPencil canvas mode). Mirrors the web routes in
-//! `web/canvas_api.rs` — same `IpcResult` envelope, same typed codes.
-//!
-//! All lifecycle goes through the shared [`CanvasDaemonPool`] (managed in
-//! `lib.rs`); `AppHandle` is used ONLY here (main-window URL origin for
-//! `--allow-origin`, agentation port for the stable MCP URL) — the pool
-//! itself stays Tauri-free so `termul-server` composes it too. The pure
-//! assembly helpers ([`window_origin_from_url`], [`agentation_scoped_mcp_url`],
-//! [`open_info_for_daemon`], [`open_failure`]) are extracted so they are
-//! unit-testable without an `AppHandle`/pool.
+//! Canvas Tauri commands. `canvas_open` / `canvas_close` mount and unmount the
+//! figcraft editor served by the loopback bundle listener; they mirror
+//! `POST /canvas/open|close` in `web/canvas_api.rs` (same `IpcResult`
+//! envelope, same typed codes) and share `canvas::static_server::open_canvas`.
+//! The `canvas_*document*` / `canvas_dirty_changed` / `canvas_write_snapshot`
+//! commands are the desktop transport of `canvas::persistence` and mirror the
+//! web routes of the same names.
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::State;
 
-use super::{sanitize_log_field, validate_project_path, IpcResult};
-use crate::canvas::mcp_proxy;
-use crate::canvas::pool::CanvasDaemonPool;
-use crate::canvas::{CanvasOpenInfo, CanvasStatus, CanvasError, CODE_DAEMON_DOWN};
+use super::{sanitize_log_field, IpcResult};
+use crate::canvas::doc_path::resolve_doc_path;
+use crate::canvas::persistence::{
+    self, canvas_mounts, CloseMode, CloseOutcome, ConflictChoice, DirtyOutcome, DiskOutcome,
+    DocumentBytes, PersistenceView, Remount, ResolveOutcome, WriteOutcome,
+};
+use crate::canvas::static_server::{
+    close_canvas, open_canvas, CanvasOpenInfo, OpenRequest, StaticServer, CODE_BUNDLE_LISTENER_DOWN,
+};
+use crate::canvas::CanvasError;
+use crate::web::ProjectRegistry;
 
-/// Serialize a webview URL's origin manually (`scheme://host[:port]`) so
-/// opaque custom schemes (`tauri://localhost`) still produce a usable
-/// string — `url::Origin::ascii_serialization` would render them as the
-/// literal "null". Carried to the daemon as the exact-string
-/// `--allow-origin` value.
-fn window_origin_from_url(url: &tauri::Url) -> String {
-    let scheme = url.scheme();
-    let host = url.host_str().unwrap_or("localhost");
-    match url.port() {
-        Some(port) => format!("{scheme}://{host}:{port}"),
-        None => format!("{scheme}://{host}"),
+const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn persistence_result<T>(
+    operation: &str,
+    project_id: &str,
+    result: Result<T, CanvasError>,
+) -> IpcResult<T> {
+    match result {
+        Ok(value) => IpcResult::success(value),
+        Err(err) => {
+            log::warn!(
+                "[canvas] {operation} failed project_id={} code={}",
+                sanitize_log_field(project_id),
+                err.code
+            );
+            IpcResult::error(err.message, err.code)
+        }
     }
 }
 
-/// The main webview's origin, carried to the daemon as `--allow-origin`
-/// (exact string). Falls back to the production Windows/Linux webview
-/// origin when the window/URL is unavailable.
-fn main_window_origin(app: &AppHandle) -> String {
-    app.get_webview_window("main")
-        .and_then(|window| window.url().ok())
-        .map(|url| window_origin_from_url(&url))
-        .unwrap_or_else(|| "http://tauri.localhost".to_string())
-}
-
-/// Pure: the per-project stable MCP URL on the desktop agentation server —
-/// `http://127.0.0.1:<port>/canvas/<canvasId>/mcp`. Id-scoped so agents of
-/// project A never route to project B's canvas; the canvas id is
-/// deterministic per project, so the URL stays stable across re-opens.
-fn agentation_scoped_mcp_url(port: u16, project_id: &str) -> String {
-    format!(
-        "http://127.0.0.1:{port}/canvas/{}/mcp",
-        crate::canvas::canvas_id_for_project(project_id)
-    )
-}
-
-/// Stable Termul-proxied MCP URL from the desktop agentation server's
-/// dynamic port; `None` when the agentation service failed to start (the
-/// renderer skips the MCP entry upsert then).
-fn agentation_mcp_url(app: &AppHandle, project_id: &str) -> Option<String> {
-    app.try_state::<crate::agentation::AgentationService>()
-        .map(|service| agentation_scoped_mcp_url(service.http_port(), project_id))
-}
-
-/// Pure: assemble the desktop `CanvasOpenInfo` for a live daemon (loopback
-/// embed URL with raw-concat `?embed=vscode` — never URL-encoded). The
-/// desktop canvas token IS the daemon's managed (handshake) token: the
-/// renderer/agents present it as the `Authorization: Bearer` credential on
-/// the agentation `/canvas(/<canvasId>)/mcp` mounts.
-fn open_info_for_daemon(
-    daemon: &crate::canvas::managed::CanvasDaemon,
-    mcp_url: Option<String>,
-) -> CanvasOpenInfo {
-    CanvasOpenInfo {
-        embed_url: format!("http://127.0.0.1:{}/?embed=vscode", daemon.port),
-        mcp_url,
-        doc_key: daemon.doc_key.clone(),
-        canvas_id: None,
-        canvas_token: Some(daemon.managed_token().to_string()),
-    }
-}
-
-/// Pure: map a typed pool error onto the command's `IpcResult` failure
-/// envelope (stable code preserved verbatim — the renderer switches on it).
-fn open_failure(err: &CanvasError) -> IpcResult<CanvasOpenInfo> {
-    IpcResult::error(err.message.clone(), err.code.clone())
-}
-
-/// `canvas_open { docPath, projectId }` — spawn (or reuse) the doc's managed
-/// daemon and return the loopback embed URL plus the id-scoped stable MCP
-/// URL.
+/// `canvas_open { docPath, projectId, request: { clientInstanceId, autosaveMs?,
+/// leaseGraceMs?, maxMounted?, crashTimeouts? } }` — the loopback bundle base
+/// plus a minted `ct` token and a new `mountSeq` for the project's canvas,
+/// leased to this window (AD-30). Typed `BUNDLE_LISTENER_DOWN` while the
+/// listener is not bound; `PATH_VALIDATION_FAILED` for a doc outside the
+/// opening project's registered root, as on the web route; `CANVAS_OPEN_ELSEWHERE`
+/// when the renderer holding the lease could not save; `EVICTION_BLOCKED`
+/// when a canvas that must make room (AD-26) could not be saved.
 #[tauri::command]
 pub async fn canvas_open(
-    app: AppHandle,
     doc_path: String,
     project_id: String,
-    pool: State<'_, Arc<CanvasDaemonPool>>,
+    request: OpenRequest,
+    server: State<'_, Arc<StaticServer>>,
+    registry: State<'_, Arc<ProjectRegistry>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
-    let validated = validate_and_stringify!(&doc_path);
     let log_project_id = sanitize_log_field(&project_id);
-    log::info!("[canvas] open start project_id={log_project_id}");
-    let allow_origin = main_window_origin(&app);
-    match pool.acquire(&validated, &allow_origin, &project_id).await {
-        Ok(daemon) => {
-            log::info!(
-                "[canvas] open success project_id={log_project_id} port={}",
-                daemon.port
+    let doc_key = match resolve_doc_path(&doc_path, &project_id, Some(&registry)) {
+        Ok(doc_key) => doc_key,
+        Err(err) => {
+            log::warn!(
+                "[canvas] open rejected project_id={log_project_id}: {}",
+                err.message
             );
-            Ok(IpcResult::success(open_info_for_daemon(
-                &daemon,
-                agentation_mcp_url(&app, &project_id),
-            )))
+            return Ok(IpcResult::error(err.message, err.code));
+        }
+    };
+    let Some(base) = server.wait_for_base(LISTENER_WAIT).await else {
+        log::warn!(
+            "[canvas] open failed project_id={log_project_id} code={CODE_BUNDLE_LISTENER_DOWN}"
+        );
+        return Ok(IpcResult::error(
+            "canvas bundle listener is not running",
+            CODE_BUNDLE_LISTENER_DOWN,
+        ));
+    };
+    match open_canvas(base, &project_id, doc_key, request).await {
+        Ok(info) => {
+            log::info!(
+                "[canvas] open project_id={log_project_id} canvas_id={} mount_seq={}",
+                info.canvas_id,
+                info.mount_seq
+            );
+            Ok(IpcResult::success(info))
         }
         Err(err) => {
             log::warn!(
                 "[canvas] open failed project_id={log_project_id} code={}",
                 err.code
             );
-            Ok(open_failure(&err))
-        }
-    }
-}
-
-/// `canvas_close { docPath }` — evict the doc's daemon (stdin EOF → kill).
-/// Idempotent: closing an unopened canvas is a success.
-#[tauri::command]
-pub async fn canvas_close(
-    doc_path: String,
-    pool: State<'_, Arc<CanvasDaemonPool>>,
-) -> Result<IpcResult<bool>, String> {
-    let validated = validate_and_stringify!(&doc_path);
-    log::info!("[canvas] close start");
-    pool.release(&validated).await;
-    Ok(IpcResult::success(true))
-}
-
-/// `canvas_save { docPath }` — save through the daemon (`POST
-/// /api/file/save`); the daemon is the `.op` document authority. No live
-/// daemon → typed `DAEMON_DOWN` (the "canvas closed" signal).
-#[tauri::command]
-pub async fn canvas_save(
-    doc_path: String,
-    pool: State<'_, Arc<CanvasDaemonPool>>,
-) -> Result<IpcResult<serde_json::Value>, String> {
-    let validated = validate_and_stringify!(&doc_path);
-    let Some(daemon) = pool.daemon_for_doc(&validated) else {
-        log::warn!("[canvas] save with no live daemon");
-        return Ok(IpcResult::error(
-            "canvas daemon is not running",
-            CODE_DAEMON_DOWN,
-        ));
-    };
-    match mcp_proxy::daemon_save(daemon.as_ref()).await {
-        Ok(value) => {
-            log::info!("[canvas] save dispatched");
-            Ok(IpcResult::success(value))
-        }
-        Err(err) => {
-            log::warn!("[canvas] save failed code={}", err.code);
             Ok(IpcResult::error(err.message, err.code))
         }
     }
 }
 
-/// `canvas_status` — pool snapshot (live daemons + active doc key).
+/// `canvas_close { projectId, mountSeq, discard? }` — unmount this window's
+/// mount `mountSeq` through the AD-31 sequence (quiesce, save, verify,
+/// unmount); a mount a newer open replaced is left alone. A failed save
+/// answers `SAVE_FAILED` and keeps the mount; `discard: true` is the user's
+/// explicit choice to drop unsaved changes. Idempotent.
 #[tauri::command]
-pub async fn canvas_status(
-    pool: State<'_, Arc<CanvasDaemonPool>>,
-) -> Result<IpcResult<CanvasStatus>, String> {
-    Ok(IpcResult::success(pool.status()))
+pub async fn canvas_close(
+    project_id: String,
+    mount_seq: u64,
+    discard: Option<bool>,
+) -> Result<IpcResult<CloseOutcome>, String> {
+    let mode = close_mode(discard);
+    let log_project_id = sanitize_log_field(&project_id);
+    log::info!("[canvas] close project_id={log_project_id} mount_seq={mount_seq} mode={mode:?}");
+    Ok(match close_canvas(&project_id, mount_seq, mode).await {
+        Ok(outcome) => {
+            log_closed(&log_project_id, &outcome);
+            IpcResult::success(outcome)
+        }
+        Err(err) => {
+            log::warn!(
+                "[canvas] close refused project_id={log_project_id} code={}: {}",
+                err.code,
+                err.message
+            );
+            IpcResult::error(err.message, err.code)
+        }
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn window_origin_serializes_http_with_port() {
-        let url = tauri::Url::parse("http://localhost:5180/tauri-index.html").unwrap();
-        assert_eq!(window_origin_from_url(&url), "http://localhost:5180");
+/// The close mode a transport's `discard` flag asks for.
+pub(crate) fn close_mode(discard: Option<bool>) -> CloseMode {
+    if discard == Some(true) {
+        CloseMode::Discard
+    } else {
+        CloseMode::Save
     }
+}
 
-    #[test]
-    fn window_origin_serializes_scheme_without_port() {
-        let url = tauri::Url::parse("https://example.com/some/path").unwrap();
-        assert_eq!(window_origin_from_url(&url), "https://example.com");
-    }
-
-    #[test]
-    fn window_origin_handles_opaque_custom_schemes() {
-        // macOS webviews run on `tauri://localhost` — `url::Origin` would
-        // serialize opaque schemes as "null"; the manual form must not.
-        let url = tauri::Url::parse("tauri://localhost/index.html").unwrap();
-        assert_eq!(window_origin_from_url(&url), "tauri://localhost");
-    }
-
-    #[test]
-    fn agentation_mcp_url_is_id_scoped_and_stable() {
-        let url = agentation_scoped_mcp_url(43123, "proj-7");
-        let expected_id = crate::canvas::canvas_id_for_project("proj-7");
-        assert_eq!(
-            url,
-            format!("http://127.0.0.1:43123/canvas/{expected_id}/mcp")
+fn log_closed(log_project_id: &str, outcome: &CloseOutcome) {
+    if outcome.discarded {
+        log::warn!(
+            "[canvas] closed project_id={log_project_id}: unsaved changes discarded by the user"
         );
-        // Deterministic per project → stable across re-opens.
-        assert_eq!(url, agentation_scoped_mcp_url(43123, "proj-7"));
-        assert_ne!(url, agentation_scoped_mcp_url(43123, "proj-8"));
-    }
-
-    #[test]
-    fn open_info_builds_loopback_embed_url_with_managed_token() {
-        let daemon =
-            crate::canvas::managed::synthetic_daemon("doc", 45111, "http://tauri.localhost");
-        let info = open_info_for_daemon(&daemon, Some("http://127.0.0.1:1/canvas/cvx/mcp".into()));
-        assert_eq!(info.embed_url, "http://127.0.0.1:45111/?embed=vscode");
-        assert_eq!(info.mcp_url.as_deref(), Some("http://127.0.0.1:1/canvas/cvx/mcp"));
-        assert_eq!(info.doc_key, "doc");
-        // Desktop embeds the daemon URL directly: no proxy id. The canvas
-        // token IS the daemon managed token (the MCP bearer credential).
-        assert_eq!(info.canvas_id, None);
-        assert_eq!(
-            info.canvas_token.as_deref(),
-            Some(daemon.managed_token()),
-            "canvasToken carries the managed token for the MCP bearer"
+    } else {
+        log::info!(
+            "[canvas] closed project_id={log_project_id} unmounted={} saved={}",
+            outcome.unmounted,
+            outcome.saved_version.as_deref().unwrap_or("none")
         );
     }
+}
 
-    #[test]
-    fn open_failure_maps_typed_codes_verbatim() {
-        for (code, message) in [
-            ("BINARY_NOT_FOUND", "op-host-web-server binary not found"),
-            ("HANDSHAKE_TIMEOUT", "daemon handshake not received"),
-            ("PATH_VALIDATION_FAILED", "doc path outside the boundary"),
-        ] {
-            let err = CanvasError::new(code, message);
-            let result = open_failure(&err);
-            assert!(!result.success);
-            assert_eq!(result.code.as_deref(), Some(code), "code {code}");
-            assert_eq!(result.error.as_deref(), Some(message));
-            assert!(result.data.is_none());
+/// `canvas_set_visible { projectId, mountSeq, visible }` — the user started
+/// or stopped looking at the canvas; activity the mount cap ranks eviction
+/// by. A mount that is gone (evicted) answers `CANVAS_CLOSED`.
+#[tauri::command]
+pub async fn canvas_set_visible(
+    project_id: String,
+    mount_seq: u64,
+    visible: bool,
+) -> Result<IpcResult<()>, String> {
+    let result = canvas_mounts().set_visible(&project_id, mount_seq, visible);
+    Ok(persistence_result("set visible", &project_id, result))
+}
+
+/// `canvas_read_document { projectId, mountSeq }` — the mounted document's
+/// bytes as base64, `null` when the file does not exist yet.
+#[tauri::command]
+pub async fn canvas_read_document(
+    project_id: String,
+    mount_seq: u64,
+) -> Result<IpcResult<DocumentBytes>, String> {
+    let result = persistence::read_document(canvas_mounts(), &project_id, mount_seq).await;
+    Ok(persistence_result("read document", &project_id, result))
+}
+
+/// `canvas_document_loaded { projectId, mountSeq, ack }` — the editor holds
+/// the document; `ack` is the `host.openDocument` result text or `null` for
+/// a new document.
+#[tauri::command]
+pub async fn canvas_document_loaded(
+    project_id: String,
+    mount_seq: u64,
+    ack: Option<String>,
+) -> Result<IpcResult<PersistenceView>, String> {
+    let result =
+        persistence::document_loaded(canvas_mounts(), &project_id, mount_seq, ack.as_deref());
+    Ok(persistence_result("document loaded", &project_id, result))
+}
+
+/// `canvas_dirty_changed { projectId, mountSeq, dirty, contentVersion }` —
+/// answers once the autosave debounce settles: `saveDue`, `idle`, or
+/// `superseded` by a later notification.
+#[tauri::command]
+pub async fn canvas_dirty_changed(
+    project_id: String,
+    mount_seq: u64,
+    dirty: bool,
+    content_version: String,
+) -> Result<IpcResult<DirtyOutcome>, String> {
+    let result = persistence::dirty_changed(
+        canvas_mounts(),
+        &project_id,
+        mount_seq,
+        dirty,
+        &content_version,
+    )
+    .await;
+    Ok(persistence_result("dirty changed", &project_id, result))
+}
+
+/// `canvas_write_snapshot { projectId, mountSeq, snapshot }` — write the
+/// `host.snapshot` result text to the project's document atomically.
+#[tauri::command]
+pub async fn canvas_write_snapshot(
+    project_id: String,
+    mount_seq: u64,
+    snapshot: String,
+) -> Result<IpcResult<WriteOutcome>, String> {
+    let result =
+        persistence::write_snapshot(canvas_mounts(), &project_id, mount_seq, &snapshot).await;
+    if let Ok(outcome) = &result {
+        log_write_outcome(&project_id, outcome);
+    }
+    Ok(persistence_result("write snapshot", &project_id, result))
+}
+
+fn log_write_outcome(project_id: &str, outcome: &WriteOutcome) {
+    let project_id = sanitize_log_field(project_id);
+    match (&outcome.mark_saved, &outcome.view.save_error) {
+        (Some(version), _) => {
+            log::info!("[canvas] saved project_id={project_id} content_version={version}");
         }
+        (None, Some(error)) => {
+            log::warn!("[canvas] save failed project_id={project_id}: {error}");
+        }
+        (None, None) => {}
     }
+}
+
+/// `canvas_disk_changed { projectId, mountSeq }` — Termul's file watcher saw
+/// the mounted document change: `unchanged` (Termul's own write), `reload`
+/// with the bytes for a clean editor, or `conflict` (AD-27).
+#[tauri::command]
+pub async fn canvas_disk_changed(
+    project_id: String,
+    mount_seq: u64,
+) -> Result<IpcResult<DiskOutcome>, String> {
+    let result = canvas_mounts().disk_changed(&project_id, mount_seq).await;
+    if let Ok(outcome) = &result {
+        log_disk_outcome(&project_id, outcome);
+    }
+    Ok(persistence_result("disk changed", &project_id, result))
+}
+
+/// The one log line per external change both transports write.
+pub(crate) fn log_disk_outcome(project_id: &str, outcome: &DiskOutcome) {
+    let project_id = sanitize_log_field(project_id);
+    match outcome {
+        DiskOutcome::Unchanged { .. } => {}
+        DiskOutcome::Reload { .. } => {
+            log::info!("[canvas] reloaded from disk project_id={project_id}: changed outside Termul");
+        }
+        DiskOutcome::Conflict { view } => log::warn!(
+            "[canvas] conflict project_id={project_id}: changed on disk with unsaved edits deleted={}",
+            view.conflict
+                .as_ref()
+                .is_some_and(|conflict| conflict.disk_hash.is_none())
+        ),
+    }
+}
+
+/// `canvas_resolve_conflict { projectId, mountSeq, choice, snapshot? }` —
+/// the user's answer to a disk conflict; `snapshot` is the `host.snapshot`
+/// result text for `saveCopy`.
+#[tauri::command]
+pub async fn canvas_resolve_conflict(
+    project_id: String,
+    mount_seq: u64,
+    choice: ConflictChoice,
+    snapshot: Option<String>,
+) -> Result<IpcResult<ResolveOutcome>, String> {
+    log::info!(
+        "[canvas] conflict resolved project_id={} choice={choice:?}",
+        sanitize_log_field(&project_id)
+    );
+    let result = persistence::resolve_conflict(
+        canvas_mounts(),
+        &project_id,
+        mount_seq,
+        choice,
+        snapshot.as_deref(),
+    )
+    .await;
+    Ok(persistence_result("resolve conflict", &project_id, result))
+}
+
+/// `canvas_crashed { projectId, mountSeq, reason }` — the editor reported
+/// `event.crashed`: remount from the last saved bytes under a new
+/// `mountSeq` (AD-31).
+#[tauri::command]
+pub async fn canvas_crashed(
+    project_id: String,
+    mount_seq: u64,
+    reason: String,
+) -> Result<IpcResult<Remount>, String> {
+    let result = canvas_mounts().crashed(&project_id, mount_seq, &reason);
+    Ok(persistence_result("crashed", &project_id, result))
 }

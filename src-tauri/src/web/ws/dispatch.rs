@@ -137,6 +137,11 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
         "watch" => handle_watch(id, &req.payload, env),
         "unwatch" => handle_unwatch(id, &req.payload, env),
         "mark_chat_read" => handle_mark_chat_read(id, &req.payload, relay),
+        // The canvas gateway's renderer leg (`canvas.rs`): mounts this
+        // connection holds and its answers to forwarded canvas calls.
+        "canvas_mount" => handle_canvas_mount(id, &req.payload, env),
+        "canvas_unmount" => handle_canvas_unmount(id, &req.payload, env),
+        "canvas_reply" => handle_canvas_reply(id, &req.payload, env),
         // Project registry commands — one command service shared with the
         // HTTP routes and the desktop (`web::project_registry::commands`):
         // each validates, persists to the durable registry, then notifies.
@@ -152,8 +157,8 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
         // remove stay on the host (desktop UI / `termul-server claude account`).
         "list_claude_accounts" => handle_list_claude_accounts(id, acp).await,
         "list_claude_usage" => handle_list_claude_usage(id, &req.payload, acp).await,
-        "set_default_claude_account" => handle_set_default_claude_account(id, &req.payload, acp),
-        "set_project_claude_account" => handle_set_project_claude_account(id, &req.payload, acp),
+        "set_default_claude_account" => handle_set_default_claude_account(id, &req.payload, acp).await,
+        "set_project_claude_account" => handle_set_project_claude_account(id, &req.payload, acp).await,
         // CAP-6 / Story 8: host-owned ACP catalog resolution. The catalog
         // carries the host's OS/arch/runtime availability + per-agent
         // resolved `SupportedAcpAgentStatus`. The web client never probes

@@ -8,6 +8,7 @@ use axum::{
     Json,
 };
 
+use crate::canvas::bundle_path::redact_canvas_path;
 use crate::web::command_ledger::{AdmissionWatch, IN_PROGRESS_RECEIPT};
 use crate::web::fs_api::IpcBody;
 
@@ -94,7 +95,7 @@ pub async fn bound(request: Request, next: Next) -> Response {
             };
             tracing::warn!(
                 target: "termul::web::route_deadline",
-                path = %path,
+                path = %redact_canvas_path(&path),
                 class = ?class,
                 deadline_secs = class.deadline().as_secs(),
                 "route outlived its deadline; answered without waiting for its blocking work"

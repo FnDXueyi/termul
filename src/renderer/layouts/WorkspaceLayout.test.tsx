@@ -3,6 +3,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { mockTerminal } from '@/lib/test-utils/terminal'
+import { useCanvasStore } from '@/stores/canvas-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { useThemePickerStore } from '@/stores/theme-picker-store'
@@ -564,6 +565,70 @@ describe('WorkspaceLayout - Empty States', () => {
       tauriRef.current = prevTauri
       webAuthGateRef.current = { status: 'ok', submitting: false }
       mockUseProjectsLoaded.mockReturnValue(true)
+    }
+  })
+
+  it('keeps a mounted canvas iframe through the mid-session token screen', async () => {
+    // The iframe holds the editor's document; unmounting it while the store
+    // still says ready would leave an empty editor that autosave can write.
+    const prevTauri = tauriRef.current
+    tauriRef.current = false
+    webAuthGateRef.current = { status: 'ok', submitting: false }
+    const info = {
+      canvasId: 'cv0123456789abcdef',
+      baseUrl: '',
+      canvasToken: 'cafe',
+      pinTag: 'termul-v1',
+      docKey: '/workspace/p/design.figcraft',
+      mountSeq: 3,
+      evicted: []
+    }
+    useCanvasStore.setState({
+      sessions: {
+        p: {
+          projectId: 'p',
+          docPath: info.docKey,
+          phase: { kind: 'ready', mount: { mountSeq: 3, info } },
+          dirty: false,
+          contentVersion: '1',
+          savedVersion: '1',
+          saving: false,
+          saveError: null,
+          closing: false,
+          conflict: null,
+          resolving: false,
+          crash: null
+        }
+      }
+    })
+    const layout = (
+      <TooltipProvider>
+        <MemoryRouter initialEntries={['/']}>
+          <WorkspaceLayout />
+        </MemoryRouter>
+      </TooltipProvider>
+    )
+    try {
+      const { rerender, container } = renderWithRouter()
+      const frame = (): Element | null =>
+        container.ownerDocument.querySelector('iframe[data-canvas-project="p"]')
+      const before = frame()
+      expect(before).not.toBeNull()
+
+      webAuthGateRef.current = { status: 'unauthorized', submitting: false }
+      rerender(layout)
+      expect(
+        await screen.findByRole('heading', { name: 'Server access token required' })
+      ).toBeInTheDocument()
+      expect(frame()).toBe(before)
+
+      webAuthGateRef.current = { status: 'ok', submitting: false }
+      rerender(layout)
+      expect(frame()).toBe(before)
+    } finally {
+      tauriRef.current = prevTauri
+      webAuthGateRef.current = { status: 'ok', submitting: false }
+      useCanvasStore.setState({ sessions: {} })
     }
   })
 

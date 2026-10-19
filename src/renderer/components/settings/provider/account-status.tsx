@@ -22,6 +22,26 @@ export interface AccountStatus {
   primary: ClaudeUsageWindow | null
 }
 
+/**
+ * Whether Claude chats can start on an Account, by the host's rule: only a
+ * confirmed login passes. `signed-out` when the login probe or the usage read
+ * finds no login; `unconfirmed` when the host could not read the login.
+ */
+export type AccountReadiness = 'ready' | 'signed-out' | 'unconfirmed'
+
+export function accountReadiness(
+  account: ClaudeAccountView,
+  usage: ClaudeAccountUsage | undefined
+): AccountReadiness {
+  if (account.signedIn === false || usage?.status === 'signed_out') return 'signed-out'
+  return account.signedIn === true ? 'ready' : 'unconfirmed'
+}
+
+export const NOT_READY_REASON: Record<Exclude<AccountReadiness, 'ready'>, string> = {
+  'signed-out': 'Signed out',
+  unconfirmed: 'Could not check sign-in'
+}
+
 /** One status for a row, so the dot, the meta words and the meter agree. */
 export function accountStatus(
   account: ClaudeAccountView,
@@ -32,8 +52,12 @@ export function accountStatus(
   const withPlan = (words: string): string => (plan ? `${plan} · ${words}` : words)
   const primary = primaryUsageWindow(usage)
   if (options.signingIn) return { tone: 'waiting', meta: withPlan('waiting for browser'), primary }
-  if (account.signedIn === false || usage?.status === 'signed_out') {
+  const readiness = accountReadiness(account, usage)
+  if (readiness === 'signed-out') {
     return { tone: 'signed-out', meta: withPlan('signed out'), primary: null }
+  }
+  if (readiness === 'unconfirmed') {
+    return { tone: 'unknown', meta: 'Could not check sign-in', primary }
   }
   if (primary) {
     const tone = usageTone(primary.percent)
@@ -46,8 +70,6 @@ export function accountStatus(
       }
     }
   }
-  if (account.signedIn === null && !usage)
-    return { tone: 'unknown', meta: 'Reading usage…', primary }
   const count = options.projectCount ?? 0
   const projects = count === 1 ? '1 project' : count > 1 ? `${count} projects` : null
   return {

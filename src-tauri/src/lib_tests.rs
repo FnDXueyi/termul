@@ -211,13 +211,12 @@ fn test_main_webview_rejects_external_urls() {
     ));
 }
 
-/// Config-drift fence for the OpenPencil canvas embed (spec
-/// spec-openpencil-canvas-mode, AD-3): the desktop main webview iframes the
-/// managed daemon at `http://127.0.0.1:<dynamic port>`, so the CSP MUST
-/// keep a loopback-scoped `frame-src` (iframe load) and `connect-src` (the
-/// bridge's same-page SSE/fetch traffic) — while staying scoped to loopback
-/// only (never a bare `http:` or `*` source, which would open arbitrary
-/// origins).
+/// Config-drift fence for the canvas embed: the desktop main webview iframes
+/// the figcraft bundle listener at `http://127.0.0.1:<dynamic port>`, so the
+/// CSP MUST keep a loopback-scoped `frame-src` (iframe load) and
+/// `connect-src` (the bundle's own fetches) — while staying scoped to
+/// loopback only (never a bare `http:` or `*` source, which would open
+/// arbitrary origins).
 #[test]
 fn canvas_csp_keeps_loopback_scoped_frame_and_connect_sources() {
     let conf_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json");
@@ -227,15 +226,15 @@ fn canvas_csp_keeps_loopback_scoped_frame_and_connect_sources() {
         .as_str()
         .expect("app.security.csp is a string");
 
-    // Loopback-scoped frame-src for the daemon iframe.
+    // Loopback-scoped frame-src for the bundle iframe.
     assert!(
         csp.contains("frame-src http://127.0.0.1:*"),
-        "CSP must allow loopback frame-src for the canvas daemon iframe: {csp}"
+        "CSP must allow loopback frame-src for the canvas bundle iframe: {csp}"
     );
-    // Loopback-scoped connect-src for bridge SSE/fetch to the daemon.
+    // Loopback-scoped connect-src for the bundle's fetches.
     assert!(
         csp.contains("connect-src") && csp.contains("http://127.0.0.1:*"),
-        "CSP must allow loopback connect-src for canvas bridge traffic: {csp}"
+        "CSP must allow loopback connect-src for canvas bundle traffic: {csp}"
     );
     // Scoped to loopback only — no bare wildcard/protocol sources that
     // would admit arbitrary origins.

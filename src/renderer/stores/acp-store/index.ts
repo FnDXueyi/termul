@@ -140,7 +140,8 @@ export {
   _resetLiveSwitchSourcesForTesting,
   _resetPromptReconcileForTesting,
   isEphemeralAcpSession,
-  persistComposerOptions
+  persistComposerOptions,
+  renewAgentCredentials
 } from './shared-state'
 export { _resetAcpAuthForTesting } from './slices/agent'
 export { mcpServerDeletionCount } from './slices/mcp'

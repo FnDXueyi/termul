@@ -1,108 +1,131 @@
 /**
- * Fetch-based HTTP impl of the canvas facade (OpenPencil canvas mode, CAP-5).
+ * Fetch-based HTTP impl of the canvas facade over the routes in
+ * `src-tauri/src/web/canvas_api.rs` and `canvas_persistence_api.rs`
+ * (same-origin, behind the bearer `web_auth_gate`; `postJson` adds the web
+ * auth header):
+ * - `POST /canvas/open` body `{ docPath, projectId, clientInstanceId,
+ *   ...CanvasOpenOptions }` → `CanvasOpenInfo` with an empty `baseUrl` (the
+ *   bundle is same-origin); this tab takes the mount lease, after the least
+ *   recently active canvases beyond `maxMounted` unloaded;
+ * - `POST /canvas/close` body `{ projectId, mountSeq, discard }` — the
+ *   host's AD-31 unmount (save, verify, unmount) of that mount only, which
+ *   also revokes the canvas token once the project has no mount;
+ * - `POST /canvas/set-visible` body `{ projectId, mountSeq, visible }` — the
+ *   user-visibility half of the mount cap's activity ranking;
+ * - `POST /canvas/read-document|document-loaded|dirty-changed|write-snapshot`
+ *   — the persistence calls, keyed by `{ projectId, mountSeq }`.
  *
- * Mirrors the desktop Tauri commands over the three HTTP routes registered in
- * `src-tauri/src/web/canvas_api.rs` (same-origin under `termul-server`, all
- * three behind the outer bearer `web_auth_gate` — `postJson` merges the web
- * auth token's `Authorization` header):
- * - `POST /canvas/open` body `{ docPath, projectId }` — returns the
- *   same-origin embed path `/canvas/<id>/?embed=vscode&ct=<token>` plus the
- *   `canvasToken` the renderer sets as the per-canvas `op_canvas_ct_<id>`
- *   cookie;
- * - `POST /canvas/close` body `{ docPath }` — idempotent evict;
- * - `POST /canvas/save` body `{ docPath }` — daemon `POST /api/file/save`.
- *
- * Transport/parse failures map to `IpcResult { success: false, code:
- * 'NETWORK_ERROR' }`; a structured `IpcBody` failure (e.g. the gate's 401
- * UNAUTHORIZED, a typed DAEMON_DOWN) keeps the server-provided code/message.
- *
- * `status` has no web route by design (the pool snapshot is a desktop-side
- * diagnostic): the web adapter answers a typed `WEB_UNSUPPORTED` failure.
+ * The bundle routes take the canvas token from their own path, so this
+ * adapter never touches cookies. Transport
+ * failures map to `NETWORK_ERROR`; server failures keep their typed code.
  */
 
 import type {
   CanvasApi,
+  CanvasCloseOutcome,
+  CanvasConflictChoice,
+  CanvasDirtyOutcome,
+  CanvasDiskOutcome,
+  CanvasDocumentBytes,
   CanvasOpenInfo,
-  CanvasSaveResult,
-  CanvasStatus
+  CanvasOpenOptions,
+  CanvasPersistenceView,
+  CanvasRemount,
+  CanvasResolveOutcome,
+  CanvasWriteOutcome
 } from '@shared/types/canvas.types'
 import type { IpcResult } from '@shared/types/ipc.types'
 
 import { postJson } from './ipc/http'
+import { getClientInstanceId } from './web-client-identity'
 
-/** Per-canvas cookie prefix carrying the canvas session token for the
- * editor iframe's root-relative `/pkg|/canvaskit|/api` traffic and the
- * `/canvas/mcp` cookie path. The full name is `op_canvas_ct_<canvasId>` so
- * one web canvas cannot overwrite another's credential; mirrors
- * `web::canvas_api`'s per-canvas cookie name. Never logged. */
-export const CANVAS_COOKIE_NAME = 'op_canvas_ct'
-
-/** Resolve the canvas id from a web embed URL's `/canvas/<id>/…` path (the
- * open response also carries it as `canvasId`; the embed path is the
- * authoritative derivation). Null for non-canvas embed URLs. */
-export function canvasIdOfEmbedUrl(embedUrl: string): string | null {
-  try {
-    const base = typeof window !== 'undefined' && window.location ? window.location.href : undefined
-    const url = new URL(embedUrl, base)
-    const match = url.pathname.match(/^\/canvas\/([^/]+)/)
-    return match?.[1] ?? null
-  } catch {
-    return null
-  }
-}
-
-/** The per-canvas cookie name (`op_canvas_ct_<id>`); falls back to the bare
- * prefix when no id is resolvable. */
-export function canvasCookieName(canvasId: string | null): string {
-  return canvasId ? `${CANVAS_COOKIE_NAME}_${canvasId}` : CANVAS_COOKIE_NAME
-}
-
-/**
- * Set the canvas session token as the same-origin per-canvas cookie, BEFORE
- * the iframe mounts: the embedded editor's root-level requests (the editor
- * wasm derives its daemon base from `window.location.origin` and uses
- * absolute paths) authenticate through it. Refreshed on every open (web
- * tokens rotate). `Secure` is appended on https origins. Value never logged.
- */
-function setCanvasCookie(canvasId: string | null, token: string): void {
-  if (typeof document === 'undefined') return
-  const secure =
-    typeof window !== 'undefined' && window.location?.protocol === 'https:' ? '; Secure' : ''
-  document.cookie = `${canvasCookieName(canvasId)}=${token}; Path=/; SameSite=Lax${secure}`
-}
-
-function webUnsupported(method: string): IpcResult<never> {
-  return {
-    success: false,
-    error: `${method} is not available on the web transport`,
-    code: 'WEB_UNSUPPORTED'
-  }
-}
-
-/** The fetch-backed impl of [`CanvasApi`]; `canvas-api.ts` picks it when
- * `!isTauriContext()`. */
 export const webCanvasApi: CanvasApi = {
-  open(docPath: string, projectId: string): Promise<IpcResult<CanvasOpenInfo>> {
-    const request = async (): Promise<IpcResult<CanvasOpenInfo>> => {
-      const result = await postJson<CanvasOpenInfo>('/canvas/open', { docPath, projectId })
-      if (result.success && result.data.canvasToken) {
-        const canvasId = result.data.canvasId ?? canvasIdOfEmbedUrl(result.data.embedUrl)
-        setCanvasCookie(canvasId, result.data.canvasToken)
-      }
-      return result
-    }
-    return request()
+  open(
+    docPath: string,
+    projectId: string,
+    options: CanvasOpenOptions = {}
+  ): Promise<IpcResult<CanvasOpenInfo>> {
+    return postJson<CanvasOpenInfo>('/canvas/open', {
+      docPath,
+      projectId,
+      clientInstanceId: getClientInstanceId(),
+      ...options
+    })
   },
 
-  close(docPath: string): Promise<IpcResult<boolean>> {
-    return postJson<boolean>('/canvas/close', { docPath })
+  setVisible(projectId: string, mountSeq: number, visible: boolean): Promise<IpcResult<void>> {
+    return postJson<void>('/canvas/set-visible', { projectId, mountSeq, visible })
   },
 
-  save(docPath: string): Promise<IpcResult<CanvasSaveResult>> {
-    return postJson<CanvasSaveResult>('/canvas/save', { docPath })
+  close(
+    projectId: string,
+    mountSeq: number,
+    discard = false
+  ): Promise<IpcResult<CanvasCloseOutcome>> {
+    return postJson<CanvasCloseOutcome>('/canvas/close', { projectId, mountSeq, discard })
   },
 
-  status(): Promise<IpcResult<CanvasStatus>> {
-    return Promise.resolve(webUnsupported('status'))
+  readDocument(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDocumentBytes>> {
+    return postJson<CanvasDocumentBytes>('/canvas/read-document', { projectId, mountSeq })
+  },
+
+  documentLoaded(
+    projectId: string,
+    mountSeq: number,
+    ack: string | null
+  ): Promise<IpcResult<CanvasPersistenceView>> {
+    return postJson<CanvasPersistenceView>('/canvas/document-loaded', {
+      projectId,
+      mountSeq,
+      ack
+    })
+  },
+
+  dirtyChanged(
+    projectId: string,
+    mountSeq: number,
+    dirty: boolean,
+    contentVersion: string
+  ): Promise<IpcResult<CanvasDirtyOutcome>> {
+    return postJson<CanvasDirtyOutcome>('/canvas/dirty-changed', {
+      projectId,
+      mountSeq,
+      dirty,
+      contentVersion
+    })
+  },
+
+  writeSnapshot(
+    projectId: string,
+    mountSeq: number,
+    snapshot: string
+  ): Promise<IpcResult<CanvasWriteOutcome>> {
+    return postJson<CanvasWriteOutcome>('/canvas/write-snapshot', {
+      projectId,
+      mountSeq,
+      snapshot
+    })
+  },
+
+  diskChanged(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDiskOutcome>> {
+    return postJson<CanvasDiskOutcome>('/canvas/disk-changed', { projectId, mountSeq })
+  },
+
+  resolveConflict(
+    projectId: string,
+    mountSeq: number,
+    choice: CanvasConflictChoice,
+    snapshot?: string
+  ): Promise<IpcResult<CanvasResolveOutcome>> {
+    return postJson<CanvasResolveOutcome>('/canvas/resolve-conflict', {
+      projectId,
+      mountSeq,
+      choice,
+      snapshot
+    })
+  },
+
+  crashed(projectId: string, mountSeq: number, reason: string): Promise<IpcResult<CanvasRemount>> {
+    return postJson<CanvasRemount>('/canvas/crashed', { projectId, mountSeq, reason })
   }
 }
