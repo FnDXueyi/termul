@@ -235,7 +235,7 @@ fn tail_slice_falls_back_when_alignment_would_empty_the_window() {
 fn read_tail_window_reads_only_the_bounded_span() {
     let mut contents = Vec::new();
     contents.extend_from_slice(b"HEAD-MARKER ");
-    contents.extend(std::iter::repeat(b'y').take(LOG_TAIL_BYTES + 1024));
+    contents.extend(std::iter::repeat_n(b'y', LOG_TAIL_BYTES + 1024));
     contents.extend_from_slice(b" TAIL-MARKER");
     let path = temp_log("window", &contents);
 
