@@ -121,7 +121,7 @@ worker () {
     cd "$wt" || exit 0
     omp -p \
       --model 'sepintu/zai/glm-5.3' \
-      --thinking low \
+      --thinking max \
       --auto-approve \
       --no-session \
       --max-time 3000 \
