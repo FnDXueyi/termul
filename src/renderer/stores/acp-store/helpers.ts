@@ -4,6 +4,7 @@
  * and no store closure — `set`/`get` arrive as parameters.
  */
 
+import type { BugReportSubmitRequest } from '@shared/types/bug-report.types'
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
 import { flattenConfigOptionValues } from '@/components/chat/chat-input-bar-config'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
@@ -1527,6 +1528,40 @@ export function parseGeneratedCommitMessage(raw: string): GeneratedCommitMessage
     summary,
     description: typeof record.description === 'string' ? record.description.trim() : ''
   }
+}
+
+/**
+ * Bug report AI draft (spec-bug-report-dialog): parse the one-shot agent's
+ * `{"title":"...","body":"..."}` reply — same output convention as
+ * `parseGeneratedCommitMessage` (optional fenced block, then strict JSON).
+ */
+export function parseGeneratedBugReportDraft(raw: string): BugReportSubmitRequest {
+  const trimmed = raw.trim()
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)
+  const jsonText = fenced?.[1]?.trim() ?? trimmed
+  let value: unknown
+  try {
+    value = JSON.parse(jsonText)
+  } catch {
+    throw new Error('The ACP agent returned an invalid bug report draft response')
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('The ACP agent returned an invalid bug report draft response')
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.title !== 'string' || record.title.trim().length === 0) {
+    throw new Error('The ACP agent returned a blank bug report title')
+  }
+  const title = record.title.trim()
+  if (/\r|\n/.test(title) || title.length > 120) {
+    throw new Error(
+      'The ACP agent returned a bug report title that is longer than 120 characters or contains a newline'
+    )
+  }
+  if (typeof record.body !== 'string' || record.body.trim().length === 0) {
+    throw new Error('The ACP agent returned a blank bug report body')
+  }
+  return { title, body: record.body.trim() }
 }
 
 export function dropEphemeralSessionState(

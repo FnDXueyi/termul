@@ -519,11 +519,31 @@ export const MAX_TERMINAL_ASSIST_SELECTION_CHARS = 20_000
 
 export const MAX_TERMINAL_ASSIST_RESPONSE_CHARS = 40_000
 
+// Bug report AI draft (spec-bug-report-dialog) — same one-shot shape as the
+// commit generator / terminal assist. The diagnostics bundle is bounded
+// host-side (64 KiB redacted log tail) but the cap below is measured on its
+// JSON encoding, which escapes newlines/quotes — a max-size, escape-heavy
+// tail inflates to ~130 KiB of JSON text, so the cap sits comfortably above
+// that bound instead of the raw 64 KiB.
+export const BUG_REPORT_DRAFT_TIMEOUT_MS = 90_000
+
+export const BUG_REPORT_DRAFT_CLEANUP_TIMEOUT_MS = 2_000
+
+export const MAX_BUG_REPORT_DESCRIPTION_CHARS = 10_000
+
+export const MAX_BUG_REPORT_DIAGNOSTICS_CHARS = 192_000
+
+export const MAX_BUG_REPORT_RESPONSE_CHARS = 40_000
+
 export const commitMessageCollectors = new Map<SessionId, CommitMessageCollector>()
 
 // Terminal AI assist collectors (#259) — same collector shape, separate map
 // so both one-shot flows can be correlated independently by session id.
 export const terminalAssistCollectors = new Map<SessionId, CommitMessageCollector>()
+
+// Bug report draft collectors (spec-bug-report-dialog) — same collector
+// shape again, third map so each one-shot flow correlates by session id.
+export const bugReportCollectors = new Map<SessionId, CommitMessageCollector>()
 
 export function rejectCommitMessageCollector(sessionId: SessionId, reason: string): void {
   commitMessageCollectors.get(sessionId)?.reject(new Error(reason))
@@ -533,10 +553,15 @@ export function rejectTerminalAssistCollector(sessionId: SessionId, reason: stri
   terminalAssistCollectors.get(sessionId)?.reject(new Error(reason))
 }
 
+export function rejectBugReportCollector(sessionId: SessionId, reason: string): void {
+  bugReportCollectors.get(sessionId)?.reject(new Error(reason))
+}
+
 /** Test-only: clear the ephemeral-session tracking set between tests. */
 export function _resetEphemeralSessionIdsForTesting(): void {
   ephemeralSessionIds.clear()
   commitMessageCollectors.clear()
+  bugReportCollectors.clear()
 }
 
 /** Test-only: mark a session as ephemeral (warm-pool seed) for persistence-skip tests. */

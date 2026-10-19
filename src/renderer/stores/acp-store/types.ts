@@ -3,6 +3,7 @@
  * (spec-04 PR A). Pure declarations only: no store logic lives here.
  */
 
+import type { BugReportContext, BugReportSubmitRequest } from '@shared/types/bug-report.types'
 import type { PendingLauncherOptions } from '@/components/agents/pending-launcher-options'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import type {
@@ -320,6 +321,21 @@ export interface PendingElicitation {
 export interface GeneratedCommitMessage {
   summary: string
   description: string
+}
+
+/**
+ * Input to `draftBugReport` (spec-bug-report-dialog): the dialog's editable
+ * description plus the already-redacted host diagnostics bundle. `diagnostics`
+ * is untrusted data — it travels JSON-encoded inside the prompt and the model
+ * is told it is redacted and must not invent credentials, tokens, or paths.
+ */
+export interface BugReportDraftInput {
+  /** Working directory the ephemeral one-shot session launches in. */
+  cwd: string
+  /** The user's free-text description of the bug (may be empty). */
+  userDescription: string
+  /** Host-collected diagnostics; `logTail` is already secret-masked. */
+  diagnostics: BugReportContext
 }
 
 export interface AcpState {
@@ -718,6 +734,12 @@ export interface AcpState {
     selection: string,
     exitCode: number | null
   ) => Promise<string>
+  /** Bug report AI draft (spec-bug-report-dialog): fill the issue title+body
+   *  in a hidden, non-persisted one-shot ACP session. Returns `null` when no
+   *  agent is configured or the draft fails/times out — the dialog owns the
+   *  static-template fallback. Never persisted chat state; text-only prompt
+   *  (screenshots stay client-side). */
+  draftBugReport: (input: BugReportDraftInput) => Promise<BugReportSubmitRequest | null>
 
   // Actions — chat history
   loadSessionIndex: () => Promise<void>

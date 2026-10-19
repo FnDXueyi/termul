@@ -2145,3 +2145,75 @@ describe('Git History commit detail parity', () => {
     expect(content).toMatch(/tracing::/)
   })
 })
+
+// spec-bug-report-dialog: bug-report facade parity. One renderer facade ships
+// the diagnostics collect + `gh` submit on BOTH transports — the Tauri
+// commands `collect_bug_report_context` / `submit_bug_report` (desktop) and
+// the `/log/*` HTTP routes (web/remote + termul-server; the `/log/` prefix
+// inherits the server's GATED_PREFIXES bearer auth). The Rust-side wiring
+// (commands module, invoke_handler, router.rs, the route handlers) is pinned
+// by the Rust test suite — this block pins the renderer-side contract.
+describe('Bug report parity (spec-bug-report-dialog)', () => {
+  const Facade = join(LIB_DIR, 'bug-report-api.ts')
+  const SharedTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'bug-report.types.ts')
+
+  it('bug-report-api.ts exists, exports bugReportApi, and branches on isTauriContext()', () => {
+    expect(existsSync(Facade), 'bug-report-api.ts should exist').toBe(true)
+    const content = readFileSync(Facade, 'utf-8')
+    expect(content).toMatch(/export\s+const\s+\bbugReportApi\b/)
+    expect(content).toMatch(/isTauriContext\(\)/)
+    for (const method of ['collectBugReportContext', 'submitBugReport']) {
+      expect(content, `bug-report-api.ts should implement ${method}`).toMatch(
+        new RegExp(`\\b${method}\\s*\\(`)
+      )
+    }
+  })
+
+  it('the facade reaches both transports with the pinned op and route names', () => {
+    const content = readFileSync(Facade, 'utf-8')
+    // Desktop: IpcResult-returning Tauri commands (the IpcResult convention,
+    // so invokeIpc — not invokeIpcWrapped).
+    expect(content).toMatch(/invokeIpc<\s*BugReportContext\s*>\('collect_bug_report_context'/)
+    expect(content).toMatch(/invokeIpc<\s*BugReportSubmitResult\s*>\('submit_bug_report'/)
+    // Web: the /log/* POST routes via postJson (IpcBody replies).
+    expect(content).toMatch(/postJson<\s*BugReportContext\s*>\('\/log\/diagnostics'/)
+    expect(content).toMatch(/postJson<\s*BugReportSubmitResult\s*>\('\/log\/report-bug'/)
+  })
+
+  it('api.ts exports the bugReportApi singleton', () => {
+    const content = readFileSync(join(LIB_DIR, 'api.ts'), 'utf-8')
+    expect(content).toMatch(/export\s*\{[^}]*\bbugReportApi\b[^}]*\}/)
+  })
+
+  it('shared types file carries the wire contract', () => {
+    expect(existsSync(SharedTypes), 'bug-report.types.ts should exist').toBe(true)
+    const content = readFileSync(SharedTypes, 'utf-8')
+    expect(content).toMatch(/export\s+interface\s+BugReportContext\b/)
+    expect(content).toMatch(/export\s+interface\s+BugReportSubmitRequest\b/)
+    expect(content).toMatch(/export\s+type\s+BugReportSubmitResult\b/)
+  })
+
+  it('the fallback helpers exist; the URL builder never emits a labels param', () => {
+    const content = readFileSync(Facade, 'utf-8')
+    expect(content).toMatch(/export\s+function\s+\bbuildIssueUrl\b/)
+    expect(content).toMatch(/export\s+function\s+\bbuildIssueMarkdown\b/)
+    expect(content).toMatch(/export\s+async\s+function\s+\bcopyBugReportToClipboard\b/)
+    // The clipboard copy reuses the canonical copyText helper (Tauri plugin,
+    // secure-context Async Clipboard API, then the textarea fallback), never
+    // a bare navigator.clipboard.writeText call.
+    expect(content).toMatch(/copyText\(/)
+    expect(content).not.toMatch(/\bnavigator\.clipboard\b/)
+    // No labels param — issue creation without triage permission can 404.
+    expect(content).not.toMatch(/labels=/)
+    // Boundary/failure logging for collect/submit exists (report contents are
+    // never logged — asserted behaviorally in bug-report-api.test.ts).
+    expect(content).toMatch(/logFrontendError/)
+  })
+
+  it('a dedicated facade test exists', () => {
+    expect(
+      existsSync(join(LIB_DIR, 'bug-report-api.test.ts')),
+      'bug-report-api.test.ts should exist'
+    ).toBe(true)
+  })
+})
