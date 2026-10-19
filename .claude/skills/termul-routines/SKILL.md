@@ -127,7 +127,7 @@ Two schedules share one lock (`/root/termul-routine-automation/.routine-lock`, `
 
 Unattended Pass 2 (issue → PR), explicit operator policy, 2026-10-19:
 
-- **Auto-open PRs nightly.** When an issue is `dev-ready`, the unattended run builds the fix, runs the full local gate, and OPENS the PR to `dev` without waiting for human pre-approval. This is an operator-authorized waiver of AGENTS.md's pre-submission approval for unattended routine runs only; CI, CodeRabbit, and the merge decision remain the safety net. Branch from `origin/dev`, never from the routine branch, and push a feature branch named `routine/<issue>-<slug>`.
+- **Claim-then-build, draft first.** When an issue is `dev-ready`, the run opens a DRAFT PR on `routine/<issue>-<slug>` IMMEDIATELY, before any code exists. The draft is the claim signal: every other agent (fast lane, daily, any future lane) MUST filter out issues that already have an open PR, draft or ready, or a live `routine/*` branch, and never claims an issue twice. After the draft, branch from `origin/dev`, fix, run the full local gate, then mark the PR ready. This is an operator-authorized waiver of AGENTS.md's pre-submission approval for unattended routine runs only; CI, CodeRabbit, and the merge decision remain the safety net.
 - **The to-agent gate still holds absolutely.** No `to-agent` label was added by anyone yet; until the operator labels issues, Pass 2 considers bugs only. The agent never adds the label itself.
 - One issue, one PR, max 3 per run. If a fix fails its gate or the repro does not hold, comment the failure on the issue and skip, do not open a red PR.
 - Post each PR link back to its issue (`Closes #<n>` in the body per the PR template).

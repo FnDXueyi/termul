@@ -4,6 +4,10 @@
 # The daily 18:30 full routine (nightly QA, chat-agent QA) is separate.
 set -uo pipefail
 
+# cron PATH is minimal; omp + gh live in ~/.local/bin / usr/bin
+PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+export PATH
+
 REPO="/root/termul-routine-automation"
 LOG_DIR="$REPO/goal-routine-runs/_automation"
 RUN_ID="fast-$(date -u +%Y%m%d-%H%M%S)"
@@ -34,7 +38,7 @@ omp -p \
   --no-session \
   --max-time 2700 \
   --cwd "$REPO" \
-  --append-system-prompt "You are the Termul routine FAST LANE agent. Your scope is deliberately narrow, do not run the full routine. Only two things: (1) FAST TRIAGE: fetch open issues updated since $SINCE (gh issue list -R gnoviawan/termul --state open --search \"updated:>$SINCE\" --json ...) and add missing labels per the skill's Pass 1 state table. Labels only, NEVER comments (comments belong to the daily full run, hourly repeats would spam). (2) ISSUE->PR: find dev-ready BUG issues, ones that reproduce on dev and have no existing open PR or routine/* branch fixing them, then per the skill's Unattended runs policy: branch routine/<issue>-<slug> from origin/dev, fix, run the full local gate, open the PR to dev with Closes #<n>, and comment the PR link on the issue. Max ONE PR per fast-lane run. Never feature issues without to-agent (never add that label). Never force-push, never merge, never close issues, never touch the routine branch itself. Everything else (nightly QA, chat-agent QA, housekeeping comments, stale sweeps) belongs to the daily run, skip it." \
+  --append-system-prompt "You are the Termul routine FAST LANE agent. Your scope is deliberately narrow, do not run the full routine. Only two things: (1) FAST TRIAGE: fetch open issues updated since $SINCE (gh issue list -R gnoviawan/termul --state open --search \"updated:>$SINCE\" --json ...) and add missing labels per the skill's Pass 1 state table. Labels only, NEVER comments (comments belong to the daily full run, hourly repeats would spam). (2) ISSUE->PR: find dev-ready BUG issues, ones that reproduce on dev and have no existing open PR or routine/* branch fixing them, then per the skill's Unattended runs policy: FIRST open a DRAFT PR immediately (title conventional-commit, body from the template with Closes #<n> and a WIP note naming the picked-up issue) so every other agent sees the claim and filters the issue out, THEN branch routine/<issue>-<slug> from origin/dev, fix, run the full local gate, and mark the PR ready for review. Max ONE PR per fast-lane run. Never feature issues without to-agent (never add that label). Never force-push, never merge, never close issues, never touch the routine branch itself. Everything else (nightly QA, chat-agent QA, housekeeping comments, stale sweeps) belongs to the daily run, skip it." \
   "Fast lane run. New-issue labels plus at most one bug-fix PR to dev. Follow the skill's Unattended runs section." \
   > "$LOG" 2>&1
 echo "--- omp exited $? at $(date -u +%FT%TZ) ---" >> "$LOG"
