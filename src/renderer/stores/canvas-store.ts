@@ -144,8 +144,14 @@ export interface CanvasState {
   attachBridge: (projectId: string, mountSeq: number, bridge: CanvasBridge) => void
   detachBridge: (projectId: string, bridge: CanvasBridge) => void
   handleBridgeEvent: (projectId: string, mountSeq: number, event: CanvasBridgeEvent) => void
-  /** Forward one control-protocol call to the project's editor. */
-  callCanvas: (projectId: string, method: string, params?: JsonText) => Promise<CanvasBridgeReply>
+  /** Forward one control-protocol call to the project's editor; `deadline`
+   * drops it unrun if it is still queued for a loading editor then. */
+  callCanvas: (
+    projectId: string,
+    method: string,
+    params?: JsonText,
+    deadline?: number
+  ) => Promise<CanvasBridgeReply>
   /** User Save: snapshot and write now, regardless of the debounce. True
    * when the file on disk holds this snapshot or a newer one. */
   saveCanvas: (projectId: string) => Promise<boolean>
@@ -726,12 +732,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       }
     },
 
-    callCanvas: (projectId, method, params) => {
+    callCanvas: (projectId, method, params, deadline) => {
       const entry = bridges.get(projectId)
       if (!entry || phaseMountSeq(projectId) !== entry.mountSeq) {
         return Promise.resolve(bridgeFailure('CANVAS_CLOSED', 'no canvas is mounted'))
       }
-      return entry.bridge.call(method, params)
+      return entry.bridge.call(method, params, deadline)
     },
 
     saveCanvas: async (projectId) => {

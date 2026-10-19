@@ -3,7 +3,8 @@
  * canvas this renderer has mounted (loading or ready) is reported to the host
  * as held by this connection, and the agent calls the host forwards run
  * through that mount's bridge. Calls made while the editor is still loading
- * wait in the bridge's queue; the host times them out, never this side.
+ * wait in the bridge's queue; the host times them out, and one still queued
+ * once the host stopped waiting is dropped unrun.
  *
  * `host.save` is the one call answered here instead of in the editor: the
  * agent's `save_file` is Termul's save of the project's document (AD-18,
@@ -92,13 +93,16 @@ export function startCanvasGateway(transport: AcpTransport = getAcpTransport()):
   if (!gateway) return () => {}
   const store = useCanvasStore.getState
 
-  gateway.setCallHandler((call) =>
-    answerGatewayCall(call, mountedSeqOf(store().sessions[call.projectId]), (method, params) =>
-      method === HOST_SAVE
-        ? hostSave(call.projectId)
-        : method === HOST_REMOUNTED
-          ? Promise.resolve(hostRemounted(call.projectId, params))
-          : store().callCanvas(call.projectId, method, params)
+  gateway.setCallHandler((call, deadline) =>
+    answerGatewayCall(
+      { ...call, deadline },
+      mountedSeqOf(store().sessions[call.projectId]),
+      (method, params) =>
+        method === HOST_SAVE
+          ? hostSave(call.projectId)
+          : method === HOST_REMOUNTED
+            ? Promise.resolve(hostRemounted(call.projectId, params))
+            : store().callCanvas(call.projectId, method, params, deadline)
     )
   )
 

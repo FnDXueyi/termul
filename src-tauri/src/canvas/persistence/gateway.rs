@@ -480,7 +480,8 @@ impl CanvasPersistence {
                 responder,
             },
         );
-        let frame = CanvasCallFrame::new(call_id, project_id, mount_seq, method, params);
+        let frame = CanvasCallFrame::new(call_id, project_id, mount_seq, method, params)
+            .expiring_in(deadline.saturating_duration_since(Instant::now()));
         let sent_at = Instant::now();
         if !holder.deliver(frame) {
             self.calls.waiting.lock().remove(&call_id);
