@@ -337,6 +337,22 @@ async fn a_reload_of_the_holder_remounts_with_a_new_mount_seq_and_keeps_the_leas
 }
 
 #[tokio::test]
+async fn a_reload_that_opens_before_its_old_page_disconnects_remounts_once_it_does() {
+    let host = Host::new();
+    let (seq_a, mut tab_a) = host.open_loaded("tab-a", "conn-a").await;
+    host.edit(seq_a).await;
+
+    let reload = host.open_in_background("tab-a");
+    tab_a.next("host.snapshot").await;
+    host.mounts.release_holder("conn-a");
+
+    let reopened = reload.await.unwrap().unwrap();
+    assert_eq!(reopened.lease, LeaseChange::Remounted { previous: seq_a });
+    assert!(reopened.mount_seq > seq_a);
+    assert_eq!(std::fs::read(&host.doc).unwrap(), b"saved at 1");
+}
+
+#[tokio::test]
 async fn a_clean_holder_in_its_grace_is_taken_over_without_a_save() {
     let host = Host::new();
     let (seq_a, _tab_a) = host.open_loaded("tab-a", "conn-a").await;

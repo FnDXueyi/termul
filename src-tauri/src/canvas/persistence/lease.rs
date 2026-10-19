@@ -205,7 +205,18 @@ impl CanvasPersistence {
                         Some(mount),
                     )
                 }
-                Some(mount) => (self.take_over(project_id, mount).await?, None),
+                Some(mount) => match self.take_over(project_id, mount).await {
+                    Ok(lease) => (lease, None),
+                    // The same renderer's page went away during the save: it
+                    // was a reload that got here first, remounted next pass.
+                    Err(_)
+                        if mount.holder == request.renderer
+                            && mount.state.lock().link.connection().is_none() =>
+                    {
+                        continue
+                    }
+                    Err(error) => return Err(error),
+                },
             };
             let mount_seq = self.next_mount_seq();
             let mount = Mount::new(mount_seq, self.tick(), request.clone(), cap, None);
