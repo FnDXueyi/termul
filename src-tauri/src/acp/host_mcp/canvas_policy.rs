@@ -307,7 +307,9 @@ pub fn resolve_project_file(root: &Path, requested: &str) -> Result<ProjectFile,
 /// Write `bytes` to `requested` inside `root`, checking the path again right
 /// before the write: a link planted since an earlier check (while the editor
 /// exported) must not lead the write out of the project. The write goes
-/// through the parent as it resolves after its folders exist.
+/// through the parent as it resolves after its folders exist, and on Windows
+/// those folders are held open through the write so none can be swapped for
+/// a link after the check ([`hold_real_folders`]).
 pub fn write_project_file(
     root: &Path,
     requested: &str,
@@ -334,8 +336,51 @@ pub fn write_project_file(
             ),
         ));
     }
+    let _held = hold_real_folders(&resolved_root, &resolved_parent).map_err(failed)?;
     crate::acp::atomic_file::replace(&resolved_parent.join(name), bytes).map_err(failed)?;
     Ok(file)
+}
+
+/// Open `root` and each folder down to `dir` (a canonical path under it)
+/// without following a link, refusing one that is a link now. Windows lets
+/// nobody rename or delete a folder, or any folder above it, while a handle
+/// that does not share delete access is open, so the checked path keeps
+/// naming the same real folders until the handles drop. Other platforms have
+/// no such hold in `std`; their write relies on the check alone.
+#[cfg(windows)]
+fn hold_real_folders(root: &Path, dir: &Path) -> std::io::Result<Vec<std::fs::File>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let below = dir
+        .strip_prefix(root)
+        .map_err(|_| std::io::Error::other("the folder is outside the project"))?;
+    let mut folder = root.to_path_buf();
+    let mut held = Vec::new();
+    for part in std::iter::once(None).chain(below.components().map(Some)) {
+        if let Some(part) = part {
+            folder.push(part);
+        }
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&folder)?;
+        // A symlink or junction; other reparse points (cloud files) are folders.
+        if handle.metadata()?.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "a folder on the path became a link after the check",
+            ));
+        }
+        held.push(handle);
+    }
+    Ok(held)
+}
+
+#[cfg(not(windows))]
+fn hold_real_folders(_root: &Path, _dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

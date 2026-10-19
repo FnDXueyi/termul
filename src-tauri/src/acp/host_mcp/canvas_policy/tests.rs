@@ -382,3 +382,31 @@ fn link_dir(target: &std::path::Path, link: &std::path::Path) -> std::io::Result
         }
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn an_export_write_holds_its_folders_so_none_can_be_swapped_for_a_link() {
+    let project = Project::new();
+    let root = std::fs::canonicalize(project.root()).unwrap();
+    let written = write_project_file(&project.root(), "assets/icons/a.png", b"png").unwrap();
+    assert_eq!(std::fs::read(&written.absolute).unwrap(), b"png");
+
+    let held = hold_real_folders(&root, &root.join("assets").join("icons")).unwrap();
+    assert!(
+        std::fs::rename(root.join("assets"), root.join("moved")).is_err(),
+        "a held folder cannot be moved aside for a link"
+    );
+    drop(held);
+    std::fs::rename(root.join("assets"), root.join("moved")).unwrap();
+
+    let outside = project.0.join("outside");
+    std::fs::create_dir_all(outside.join("icons")).unwrap();
+    if let Err(error) = link_dir(&outside, &root.join("assets")) {
+        eprintln!("skipped: this machine cannot create a directory link ({error})");
+        return;
+    }
+    assert!(
+        hold_real_folders(&root, &root.join("assets").join("icons")).is_err(),
+        "a folder swapped for a link since the check is refused"
+    );
+}
