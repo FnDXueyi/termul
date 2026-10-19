@@ -81,6 +81,7 @@ vi.mock('@/lib/api', async (importActual) => {
 
 import type { AcpTransport } from '@/lib/acp-transport'
 import { _resetAcpTransportForTests, _setAcpTransportForTests } from '@/lib/acp-transport'
+import { describeProviderFailure } from '@/lib/agents/acp-spawn-errors'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import {
   _resetAcpAuthForTesting,
@@ -632,5 +633,122 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
 
     await closeChatThenStartAnother(transport)
     expect(transport.spawnAgent).not.toHaveBeenCalled()
+  })
+})
+
+function failedTurnPayload(lastTurnError?: Record<string, unknown>): Record<string, unknown> {
+  const record = persistedRecord('active') as { metadata: Record<string, unknown> }
+  return {
+    ...record,
+    metadata: { ...record.metadata, turnActive: false, ...(lastTurnError ? { lastTurnError } : {}) }
+  }
+}
+
+describe('acp-store: a reload restores the error of a chat whose last turn failed (#1298)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(isTauriContext).mockReturnValue(false)
+    _resetAcpTransportForTests(null)
+    _resetInFlightHistoryOpensForTesting()
+    _resetAcpAuthForTesting()
+    _resetInFlightPreparedForTesting()
+    _resetEphemeralSessionIdsForTesting()
+    _resetSessionIndexLoadGenerationForTesting()
+    _resetHistorySeqWatermarksForTesting()
+    _resetLiveSwitchSourcesForTesting()
+    useAcpStore.setState(FRESH)
+    useAcpStore.setState({
+      agentConfigs: [
+        {
+          id: CONFIG_ID,
+          name: 'Claude',
+          command: 'claude',
+          args: [],
+          env: {},
+          templateId: 'claude-acp'
+        }
+      ]
+    })
+  })
+
+  const agentError = {
+    stopReason: 'error',
+    message: 'Internal error',
+    code: -32603
+  }
+
+  it('web: the reopen shows the error with its code, and the chat is idle', async () => {
+    const transport = fakeWebTransport([ownerSummary()], {
+      [SESSION]: failedTurnPayload(agentError)
+    })
+    _setAcpTransportForTests(transport)
+
+    await useAcpStore.getState().openHistorySession(SESSION)
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(session.lastError).toBe('Internal error')
+    expect(session.lastErrorCode).toBe(-32603)
+    expect(session.lastErrorData).toBeUndefined()
+    expect(session.activeTurn).toBe(false)
+    expect(session.openTurnId).toBeNull()
+    expect(session.status).toBe('active')
+  })
+
+  it('desktop: the reopen shows the error with its code, and the chat is idle', async () => {
+    vi.mocked(isTauriContext).mockReturnValue(true)
+    const transport = fakeWebTransport([], { [SESSION]: failedTurnPayload(agentError) })
+    _setAcpTransportForTests(transport)
+
+    await useAcpStore.getState().openHistorySession(SESSION)
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(session.lastError).toBe('Internal error')
+    expect(session.lastErrorCode).toBe(-32603)
+    expect(session.lastErrorData).toBeUndefined()
+    expect(session.activeTurn).toBe(false)
+    expect(session.status).toBe('active')
+  })
+
+  it('a provider failure reopens with the same wording the live banner used', async () => {
+    const transport = fakeWebTransport([ownerSummary()], {
+      [SESSION]: failedTurnPayload({
+        stopReason: 'error',
+        message: 'quota',
+        providerCode: 'provider_quota_exceeded'
+      })
+    })
+    _setAcpTransportForTests(transport)
+
+    await useAcpStore.getState().openHistorySession(SESSION)
+
+    expect(useAcpStore.getState().sessions[SESSION].lastError).toBe(
+      describeProviderFailure('provider_quota_exceeded', 'quota')
+    )
+  })
+
+  it('a terminator without error detail reopens with its stop-reason note', async () => {
+    const transport = fakeWebTransport([ownerSummary()], {
+      [SESSION]: failedTurnPayload({ stopReason: 'crashed' })
+    })
+    _setAcpTransportForTests(transport)
+
+    await useAcpStore.getState().openHistorySession(SESSION)
+
+    expect(useAcpStore.getState().sessions[SESSION].lastError).toBe(
+      'The agent stopped unexpectedly.'
+    )
+  })
+
+  it('a chat whose last turn succeeded reopens with no error', async () => {
+    const transport = fakeWebTransport([ownerSummary()], { [SESSION]: failedTurnPayload() })
+    _setAcpTransportForTests(transport)
+
+    await useAcpStore.getState().openHistorySession(SESSION)
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(session.lastError).toBeNull()
+    expect(session.lastErrorCode).toBeNull()
+    expect(session.lastErrorData).toBeUndefined()
+    expect(session.status).toBe('active')
   })
 })

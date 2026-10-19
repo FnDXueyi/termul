@@ -1,4 +1,4 @@
-import { COMMAND_RESULT_CODES } from '@shared/types/ipc.types'
+import { COMMAND_RESULT_CODES, type IpcResult } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { useShallow } from 'zustand/shallow'
@@ -18,6 +18,64 @@ import { sha256Hex } from '@/lib/sha256-hex'
 
 /** Saves currently in flight, by file path (in-flight guard, QA r2 story 4). */
 const savesInFlight = new Map<string, Promise<boolean>>()
+
+interface RenameHold {
+  from: string
+  to: string
+  /** Settles to whether the rename succeeded. */
+  outcome: Promise<boolean>
+}
+
+/** Renames in flight; each holds saves to its path and to everything under it. */
+const renamesInFlight = new Set<RenameHold>()
+
+function forwardSlashes(path: string): string {
+  return path.replace(/\\/g, '/')
+}
+
+function isAtOrUnder(path: string, folder: string): boolean {
+  const normalized = forwardSlashes(path)
+  return normalized === folder || normalized.startsWith(`${folder}/`)
+}
+
+/**
+ * Run `rename`, which moves `fromPath` (a file or folder) to `toPath` on disk
+ * and moves the open files under it in this store, without racing their saves.
+ * It starts once no save at or under `fromPath` is in flight, so a write
+ * already sent lands before the move. A save requested at or under `fromPath`
+ * meanwhile, including for a file opened during the wait, waits for the rename,
+ * then saves the file wherever it ended up.
+ */
+export async function renameBetweenSaves(
+  fromPath: string,
+  toPath: string,
+  rename: () => Promise<IpcResult<void>>
+): Promise<IpcResult<void>> {
+  const from = forwardSlashes(fromPath)
+  let settle: (renamed: boolean) => void = () => {}
+  const hold: RenameHold = {
+    from,
+    to: forwardSlashes(toPath),
+    outcome: new Promise<boolean>((resolve) => {
+      settle = resolve
+    })
+  }
+  renamesInFlight.add(hold)
+  let renamed = false
+  try {
+    const savesUnderway = (): Array<Promise<boolean>> =>
+      [...savesInFlight].filter(([path]) => isAtOrUnder(path, from)).map(([, save]) => save)
+    for (let saves = savesUnderway(); saves.length > 0; saves = savesUnderway()) {
+      await Promise.all(saves)
+    }
+    const result = await rename()
+    renamed = result.success
+    return result
+  } finally {
+    renamesInFlight.delete(hold)
+    settle(renamed)
+  }
+}
 
 /**
  * Boundary log for editor saves. Failures route through logFrontendError
@@ -330,7 +388,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...file,
       filePath: toPath,
       language: detectLanguage(toPath),
-      // The save in flight belongs to the old path and cannot finish for this entry.
+      // A finished save's status reset is keyed to the old path and cannot reach this entry.
       operationStatus: 'idle',
       viewMode: getDefaultViewMode(toPath) === 'markdown' ? file.viewMode : 'code'
     }
@@ -377,6 +435,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   saveFile: async (path: string): Promise<boolean> => {
+    for (const hold of renamesInFlight) {
+      if (!isAtOrUnder(path, hold.from)) continue
+      return hold.outcome.then((renamed) =>
+        get().saveFile(renamed ? `${hold.to}${forwardSlashes(path).slice(hold.from.length)}` : path)
+      )
+    }
+
     // In-flight guard (QA r2 story 4): serialize concurrent save requests for
     // the same path (autosave debounce + manual button/Ctrl+S can race). The
     // second caller awaits the first write's completion, then re-checks

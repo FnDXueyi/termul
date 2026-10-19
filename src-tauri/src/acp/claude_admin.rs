@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::acp::{AcpCatalogService, AcpInstallService, ClaudeAgentService, ClaudeAuthMode};
+use crate::acp::{
+    AcpCatalogService, AcpInstallService, ClaudeAgentService, ClaudeAuthMode, SignInCheck,
+};
 use crate::data_lock::DataLocks;
 use crate::web::ServerConfig;
 
@@ -195,6 +197,15 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
+/// Run one account operation on a fresh runtime (the CLI has none of its own).
+fn block_on(
+    operation: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    tokio::runtime::Runtime::new()
+        .map_err(|error| format!("could not start runtime: {error}"))?
+        .block_on(operation)
+}
+
 /// `termul-server claude account <list|add|login|rename|remove|default|project>`.
 /// Prints account names and ids only — never login details.
 fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
@@ -243,9 +254,13 @@ fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
             }),
             Err(error) => Err(format!("could not start runtime: {error}")),
         },
-        ["default", id] => service.set_default_account(id),
-        ["project", project, "default"] => service.set_project_account(project, None),
-        ["project", project, id] => service.set_project_account(project, Some(id)),
+        ["default", id] => block_on(service.set_default_account(id, SignInCheck::Skip)),
+        ["project", project, "default"] => {
+            block_on(service.set_project_account(project, None, SignInCheck::Skip))
+        }
+        ["project", project, id] => {
+            block_on(service.set_project_account(project, Some(id), SignInCheck::Skip))
+        }
         _ => {
             eprintln!("{}", usage_text());
             return ExitCode::from(2);

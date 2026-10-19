@@ -33,9 +33,12 @@ export async function openWorkspace(page: Page): Promise<void> {
 /** Select a project in the Rail. */
 export async function selectProject(page: Page, name: string): Promise<void> {
   // Prefix match: the active project's label carries an " (active)" suffix.
+  // Click the icon column: hovering the row reveals its settings gear over
+  // the name, and with status marks showing the gear sits at the row's center.
   await page
     .locator(`[aria-label^="Project: ${cssEscape(name)}"]`)
     .first()
+    .locator('[data-rail-icon-column]')
     .click()
   // Wait for the Rail to mark it active (the workspace restore follows).
   await page
@@ -102,8 +105,12 @@ export async function launchChat(page: Page, prompt: string): Promise<void> {
       if (attempt === 2) throw new Error('Agent launcher composer never appeared')
     }
   }
+  // The launcher shows its composer before the selected agent is ready, and
+  // keeps it non-editable ("Composer unavailable") until then.
+  await expect(composer).toHaveAttribute('contenteditable', 'true')
   await composer.click()
   await page.keyboard.type(prompt)
+  await expect(composer).toHaveText(prompt)
   await page.keyboard.press('Enter')
   // The chat tab's aria-label is the session title (= the first prompt text).
   await chatTab(page, prompt).waitFor({ state: 'visible' })

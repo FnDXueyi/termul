@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use parking_lot::Mutex;
 use rmcp::transport::auth::{
     AuthorizationCallback, AuthorizationManager, AuthorizationRequest, AuthorizationSession,
-    CredentialStore, OAuthState, StoredCredentials,
+    CredentialStore, InMemoryCredentialStore, OAuthState, OAuthTokenResponse, StoredCredentials,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -201,33 +201,15 @@ pub async fn get_valid_token(server_url: &str) -> Result<Option<String>, McpOAut
         Some(t) if t.refresh_token.is_some() => match refresh_token(&t).await {
             Ok(new) => {
                 store_token(server_url, &new)?;
+                log::info!("[mcp-oauth] expired token refreshed (url redacted)");
                 Ok(Some(new.access_token))
             }
             Err(_) => {
+                log::warn!("[mcp-oauth] token refresh failed, stored token removed (url redacted)");
                 let _ = delete_stored_token(server_url);
                 Ok(None)
             }
         },
-        Some(_) => {
-            let _ = delete_stored_token(server_url);
-            Ok(None)
-        }
-        None => Ok(None),
-    }
-}
-
-/// Blocking variant of `get_valid_token` — loads the token from the file
-/// without async. Used by `inject_oauth_tokens` which is called from a sync
-/// context (session/new injection must not block the runtime).
-pub fn get_valid_token_blocking(server_url: &str) -> Result<Option<String>, McpOAuthError> {
-    let stored = load_stored_token(server_url)?;
-    match stored {
-        Some(token) if !is_token_expired(&token) => Ok(Some(token.access_token)),
-        Some(token) if token.refresh_token.is_some() => {
-            log::info!("[mcp-oauth] token expired for server (url redacted)");
-            let _ = delete_stored_token(server_url);
-            Ok(None)
-        }
         Some(_) => {
             let _ = delete_stored_token(server_url);
             Ok(None)
@@ -250,6 +232,24 @@ async fn refresh_token(stored: &StoredToken) -> Result<StoredToken, McpOAuthErro
         "http://127.0.0.1/callback",
     );
     manager.configure_client(config).ok();
+    // The manager refreshes from its credential store, which starts empty.
+    let credentials: OAuthTokenResponse = serde_json::from_value(serde_json::json!({
+        "access_token": stored.access_token,
+        "token_type": "bearer",
+        "refresh_token": stored.refresh_token,
+    }))
+    .map_err(|e| McpOAuthError::TokenExchangeFailed(format!("stored token: {e}")))?;
+    let store = InMemoryCredentialStore::new();
+    store
+        .save(StoredCredentials::new(
+            stored.client_id.clone(),
+            Some(credentials),
+            Vec::new(),
+            None,
+        ))
+        .await
+        .map_err(|e| McpOAuthError::TokenExchangeFailed(e.to_string()))?;
+    manager.set_credential_store(store);
     let tr = manager
         .refresh_token()
         .await
@@ -454,4 +454,4 @@ pub fn bearer_header(token: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

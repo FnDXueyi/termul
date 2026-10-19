@@ -275,6 +275,45 @@ jobs:
         shell: bash
         run: test -f dist-web/index.html && test -s dist-web/index.html
 
+      # The figcraft canvas bundle is embedded alongside dist-web/ (spine
+      # AD-24): fetched by the pin in canvas/figcraft.pin, sha256 verified, and
+      # unpacked to canvas/bundle/ before the cargo build.
+      - name: Check figcraft pin
+        run: bun scripts/canvas/check-figcraft-pin.mjs
+
+      - name: Fetch and verify figcraft bundle (canvas/bundle/)
+        run: bun scripts/canvas/fetch-figcraft-bundle.mjs
+
+      - name: Assert canvas/bundle/index.html exists
+        shell: bash
+        run: test -f canvas/bundle/index.html && test -s canvas/bundle/index.html
+
+      # Tauri ignores the stapler's exit status, so a transient CloudKit failure
+      # (macos-15-intel has dropped the connection with NSURLErrorDomain -1005)
+      # ships an unstapled .app inside the DMG and updater archive (#1388).
+      # Shadow xcrun so `stapler staple` retries and logs its output.
+      - name: Retry stapler staple during the macOS build
+        if: startsWith(matrix.platform, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim_dir="$RUNNER_TEMP/xcrun-shim"
+          mkdir -p "$shim_dir"
+          cat > "$shim_dir/xcrun" <<'SH'
+          #!/bin/bash
+          set -o pipefail
+          if [[ "${1-}" == stapler && "${2-}" == staple ]]; then
+            for delay in 0 15 30 60 120; do
+              sleep "$delay"
+              /usr/bin/xcrun "$@" 2>&1 | tee -a "$RUNNER_TEMP/stapler-staple.log" && exit 0
+            done
+            exit 1
+          fi
+          exec /usr/bin/xcrun "$@"
+          SH
+          chmod +x "$shim_dir/xcrun"
+          echo "$shim_dir" >> "$GITHUB_PATH"
+
       - name: Build platform artifacts locally
         id: tauri
         uses: tauri-apps/tauri-action@fce9c6108b31ea247710505d3aaaa893ee6768d4 # v0
@@ -322,6 +361,13 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          if [[ ! -s "$RUNNER_TEMP/stapler-staple.log" ]]; then
+            echo "Tauri's stapler staple never reached the xcrun shim." >&2
+            exit 1
+          fi
+          echo "::group::Tauri .app staple output"
+          cat "$RUNNER_TEMP/stapler-staple.log"
+          echo "::endgroup::"
           dmgs=("src-tauri/target/$RUST_TARGET/release/bundle/dmg"/*.dmg)
           if [[ "${#dmgs[@]}" -ne 1 ]]; then
             echo "Expected exactly one macOS DMG before notarization." >&2
@@ -520,6 +566,15 @@ jobs:
 
       - name: Assert dist-web/index.html exists
         run: test -f dist-web/index.html && test -s dist-web/index.html
+
+      - name: Check figcraft pin
+        run: bun scripts/canvas/check-figcraft-pin.mjs
+
+      - name: Fetch and verify figcraft bundle (canvas/bundle/)
+        run: bun scripts/canvas/fetch-figcraft-bundle.mjs
+
+      - name: Assert canvas/bundle/index.html exists
+        run: test -f canvas/bundle/index.html && test -s canvas/bundle/index.html
 
       - name: Build termul-server (linux-${{ matrix.arch }} release)
         working-directory: src-tauri
@@ -770,6 +825,23 @@ jobs:
     secrets:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
+  # The image downloads and verifies the published termul-server assets, so it
+  # runs after publish_release and only on tag pushes.
+  container_image:
+    name: Publish container image
+    needs: [changelog, publish_release]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish-container-image.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+      # Only a stable release moves `latest`.
+      image_tags: |
+        ${{ needs.changelog.outputs.normalized_version }}
+        ${{ needs.changelog.outputs.is_prerelease != 'true' && 'latest' || '' }}
+
   # Manual Insider→Stable promotion. Copies the moving-tag Insider manifest,
   # rewrites its version + asset URLs to a stable tag (whose release must
   # already exist from a normal `v*` tag push), and publishes `latest-stable.json`
@@ -780,6 +852,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2
@@ -877,3 +950,21 @@ jobs:
           '
           gh release upload "$STABLE_TAG" latest-stable.json latest.json --clobber
           echo "Promoted Insider $RC_TAG manifest to Stable $STABLE_TAG."
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+
+      # Retag the stable image as `latest` without rebuilding it.
+      - name: Retag the stable container image as latest
+        env:
+          STABLE_VERSION: ${{ inputs.stable_version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          image="ghcr.io/${OWNER,,}/termul-server"
+          docker buildx imagetools create --tag "$image:latest" "$image:${STABLE_VERSION//+/-}"

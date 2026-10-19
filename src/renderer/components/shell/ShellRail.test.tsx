@@ -415,7 +415,7 @@ describe('ShellRail', () => {
       useShellLayoutStore.setState({ railExpanded: false })
     })
 
-    it('shows only the icons: project stack, Column tabs, Search, Canvas, SSH, Settings, Report a bug', () => {
+    it('shows only the icons: project stack, Column tabs, Search, Canvas, SSH, Theme, Shortcuts, Settings, Report a bug', () => {
       renderRail()
 
       const nav = screen.getByRole('navigation', { name: 'Projects' })
@@ -434,7 +434,10 @@ describe('ShellRail', () => {
         'Search',
         'Open canvas',
         'SSH hosts',
-        // Same relative order as the expanded footer: Settings, then Report a bug.
+        // Pinned at the bottom; Settings then Report a bug, the same
+        // relative pair order as the expanded footer.
+        'Color themes',
+        'Open keyboard shortcuts menu',
         'Settings',
         'Report a bug'
       ])
@@ -447,10 +450,14 @@ describe('ShellRail', () => {
       expect(band).toHaveClass('h-12', 'pt-2')
       expect(band).toHaveAttribute('data-tauri-drag-region')
       expect(within(band).getByTestId('rail-brand-swap')).toBeInTheDocument()
-      // Settings + Report a bug are pinned at the bottom.
+      // Theme, Shortcuts, Settings and Report a bug are pinned at the bottom.
       const bottom = screen.getByRole('button', { name: 'Settings' }).parentElement as HTMLElement
       expect(bottom).toHaveClass('mt-auto')
-      expect(within(bottom).getAllByRole('button')).toHaveLength(2)
+      expect(
+        within(bottom)
+          .getAllByRole('button')
+          .map((b) => b.getAttribute('aria-label'))
+      ).toEqual(['Color themes', 'Open keyboard shortcuts menu', 'Settings', 'Report a bug'])
     })
 
     it('puts the mark / toggle swap below the empty top band under the macOS traffic lights', () => {
@@ -479,16 +486,19 @@ describe('ShellRail', () => {
       const mark = screen.getByTestId('rail-brand-swap-mark')
       expect(within(mark).getByTestId('shell-brand-mark')).toBeInTheDocument()
       expect(mark).toHaveClass(
-        'group-hover/rail:translate-x-full',
+        'group-hover/rail:translate-x-[var(--distance-base)]',
         'group-hover/rail:opacity-0',
-        'group-focus-within/swap:translate-x-full',
+        'group-hover/rail:blur-[var(--blur-small)]',
+        'group-focus-within/swap:translate-x-[var(--distance-base)]',
         'group-focus-within/swap:opacity-0',
         // jsdom cannot evaluate media queries: the pinned-on-no-hover state is
         // covered by asserting these tokens, not by simulating the condition.
         '[@media(any-hover:none)]:pointer-events-none',
         '[@media(any-hover:none)]:opacity-0',
-        'duration-[220ms]',
-        'motion-reduce:transition-none'
+        'duration-[var(--duration-fast)]',
+        // Hover-in waits 80ms; hover-out and focus do not.
+        'group-hover/rail:delay-[var(--duration-micro)]',
+        'motion-reduce:transition-opacity'
       )
 
       const toggleSlot = screen.getByTestId('rail-brand-swap-toggle')
@@ -498,17 +508,18 @@ describe('ShellRail', () => {
       expect(toggle).toHaveAttribute('aria-pressed', 'false')
       // The slot clips at 36px, so the focus ring is drawn inside.
       expect(toggle).toHaveClass('size-9', 'focus-visible:ring-inset')
-      // Rest: off to the left and transparent; shown on hover, focus, touch.
+      // Rest: 8px to the left, faded and blurred; shown on hover, focus, touch.
       expect(toggleSlot).toHaveClass(
-        '-translate-x-full',
+        '-translate-x-[var(--distance-base)]',
         'opacity-0',
+        'blur-[var(--blur-small)]',
         'group-hover/rail:translate-x-0',
         'group-hover/rail:opacity-100',
         'group-focus-within/swap:translate-x-0',
         'group-focus-within/swap:opacity-100',
         '[@media(any-hover:none)]:translate-x-0',
         '[@media(any-hover:none)]:opacity-100',
-        'motion-reduce:transition-none'
+        'motion-reduce:transition-opacity'
       )
     })
 

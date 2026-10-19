@@ -946,7 +946,7 @@ describe('AgentLauncher ACP new thread', () => {
   })
 
   it('applies the displayed options to a claimed warm session before the first prompt', async () => {
-    const key = 'acp-registry:claude-acp /work '
+    const key = 'acp-registry:claude-acp\0/work\0'
     acpStateRef.current.agentConfigs = [ACP_CONFIG]
     mockPersistRead.mockResolvedValue({
       success: true,
@@ -3981,4 +3981,101 @@ describe('AgentLauncher exit handoff', () => {
     expect(composer).toBeTruthy()
     expect((composer!.parentElement as HTMLElement).style.transform).toBe('')
   })
+})
+
+const { mockClaudeAccountsApi, mockSwitchProjectClaudeAccount } = vi.hoisted(() => ({
+  mockClaudeAccountsApi: { list: vi.fn(), usage: vi.fn() },
+  mockSwitchProjectClaudeAccount: vi.fn()
+}))
+vi.mock('@/lib/claude-accounts-api', () => ({ claudeAccountsApi: mockClaudeAccountsApi }))
+vi.mock('@/stores/claude-account-switch', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/stores/claude-account-switch')>()),
+  switchProjectClaudeAccount: mockSwitchProjectClaudeAccount
+}))
+
+describe('AgentLauncher Claude account chip', () => {
+  const snapshot = (projectAccounts: Record<string, string> = {}) => ({
+    accounts: [
+      { id: 'default', name: 'Personal', builtin: true, signedIn: true },
+      { id: 'ab12', name: 'Work', builtin: false, signedIn: true }
+    ],
+    defaultAccountId: 'default',
+    projectAccounts
+  })
+  const sessionWindow = (accountId: string, percent: number) => ({
+    accountId,
+    status: 'ok' as const,
+    subscriptionType: 'max',
+    windows: [
+      { kind: 'session', group: null, scope: null, percent, resetsAt: null, severity: null }
+    ],
+    checkedAt: 1,
+    message: null
+  })
+
+  beforeEach(() => {
+    mockClaudeAccountsApi.list.mockResolvedValue(snapshot())
+    mockClaudeAccountsApi.usage.mockResolvedValue([
+      sessionWindow('default', 37),
+      sessionWindow('ab12', 5)
+    ])
+    mockSwitchProjectClaudeAccount.mockResolvedValue(undefined)
+    acpStateRef.current.agentConfigs = [ACP_CONFIG, OTHER_ACP_CONFIG]
+    mockPersistRead.mockResolvedValue({
+      success: true,
+      data: { agentId: 'acp-registry:claude-acp', mode: 'acp' }
+    })
+  })
+
+  afterEach(() => {
+    mockMobileShell.current = null
+  })
+
+  it("shows the project's account next to the attach button and switches it from the menu", async () => {
+    renderLauncher()
+
+    const chip = await screen.findByRole('button', {
+      name: 'Claude account: Personal, 37% of its limit used. Change account'
+    })
+    expect(chip).toHaveTextContent('Personal37%')
+    expect(screen.getByRole('button', { name: 'Attach files' }).parentElement).toContainElement(
+      chip
+    )
+
+    fireEvent.pointerDown(chip, { button: 0, ctrlKey: false })
+    expect(await screen.findByText('Account for this project')).toBeInTheDocument()
+    // The menu re-reads the account list when it opens; let that read finish
+    // before the post-switch snapshot becomes the next list result.
+    await waitFor(() => expect(mockClaudeAccountsApi.list).toHaveBeenCalledTimes(2))
+    mockClaudeAccountsApi.list.mockResolvedValue(snapshot({ p1: 'ab12' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Work/ }))
+
+    await waitFor(() => expect(mockSwitchProjectClaudeAccount).toHaveBeenCalledWith('p1', 'ab12'))
+    expect(
+      await screen.findByRole('button', {
+        name: 'Claude account: Work, 5% of its limit used. Change account'
+      })
+    ).toBeInTheDocument()
+  })
+
+  it('shows only the status dot and usage on the phone shell', async () => {
+    mockMobileShell.current = true
+    renderLauncher()
+
+    const chip = await screen.findByRole('button', {
+      name: 'Claude account: Personal, 37% of its limit used. Change account'
+    })
+    expect(chip).toHaveTextContent(/^37%$/)
+  })
+
+  it('hides the chip when the user picks an agent other than Claude', async () => {
+    renderLauncher()
+
+    expect(await screen.findByRole('button', { name: /^Claude account: Personal/ })).toBeVisible()
+    fireEvent.click(await screen.findByRole('button', { name: /Currently Claude Agent/ }))
+    fireEvent.click(await screen.findByRole('tab', { name: 'OpenCode' }))
+
+    expect(await screen.findByRole('button', { name: /Currently OpenCode/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Claude account:/ })).not.toBeInTheDocument()
+  }, 10000)
 })

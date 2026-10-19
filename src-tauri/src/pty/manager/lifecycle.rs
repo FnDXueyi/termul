@@ -389,12 +389,21 @@ impl PtyManager {
     /// instead of the previous behavior (empty claim → the renderer silently
     /// spawns a duplicate shell per device). Terminals with no live
     /// attachment keep the replace-and-reissue semantics below.
-    pub fn list_preserved(&self, project_id: &str) -> Vec<PreservedTerminal> {
+    ///
+    /// `terminal_id` narrows the listing (and so the re-issue) to one
+    /// terminal: recovering one terminal's lost rotation must not invalidate
+    /// the claims its siblings' holders still present.
+    pub fn list_preserved(
+        &self,
+        project_id: &str,
+        terminal_id: Option<&str>,
+    ) -> Vec<PreservedTerminal> {
         let instances: Vec<Arc<TerminalInstance>> = self
             .terminals
             .read()
             .values()
             .filter(|instance| instance.project_matches(project_id))
+            .filter(|instance| terminal_id.is_none_or(|id| instance.id == id))
             .cloned()
             .collect();
         instances

@@ -3,6 +3,7 @@ import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import type { SupportedAcpAgentEntry } from '@/lib/agents/supported-acp-agents'
 import {
   buildAgentTabs,
+  capabilitySummary,
   catalogFromPersisted,
   catalogFromSessionState,
   entryDisableReason,
@@ -175,5 +176,47 @@ describe('entryDisableReason', () => {
     expect(entryDisableReason(entry(null, 'x', 'unavailable'))).toBe(
       'Not available on this platform'
     )
+  })
+})
+
+describe('capabilitySummary', () => {
+  it('lists the prompt content and MCP transports the agent advertises', () => {
+    expect(
+      capabilitySummary({
+        promptCapabilities: { image: true, audio: false, embeddedContext: true },
+        mcpCapabilities: { http: true, sse: false }
+      })
+    ).toBe('Accepts: Text · Images · Embedded context\nMCP servers: stdio · HTTP')
+  })
+
+  it('lists SSE and audio when the agent advertises them', () => {
+    expect(
+      capabilitySummary({
+        promptCapabilities: { audio: true },
+        mcpCapabilities: { http: true, sse: true }
+      })
+    ).toBe('Accepts: Text · Audio (cannot attach yet)\nMCP servers: stdio · HTTP · SSE')
+  })
+
+  it('names the baseline when the agent advertises nothing beyond it', () => {
+    expect(
+      capabilitySummary({
+        promptCapabilities: { image: false, audio: false, embeddedContext: false },
+        mcpCapabilities: { http: false, sse: false }
+      })
+    ).toBe('Accepts: Text only\nMCP servers: stdio only')
+  })
+
+  it('shows only the block the agent advertised', () => {
+    expect(capabilitySummary({ mcpCapabilities: { sse: true } })).toBe('MCP servers: stdio · SSE')
+  })
+
+  it.each([
+    ['no capabilities', undefined],
+    ['null capabilities', null],
+    ['capabilities without either field', { loadSession: true }],
+    ['null capability fields', { promptCapabilities: null, mcpCapabilities: null }]
+  ] as const)('is null for %s', (_name, capabilities) => {
+    expect(capabilitySummary(capabilities)).toBeNull()
   })
 })

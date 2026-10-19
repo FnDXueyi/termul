@@ -30,6 +30,7 @@ import {
   browserTabId as workspaceBrowserTabId
 } from '@/stores/workspace-store'
 import { isDetachedReuseKey, parseReuseKey } from '../../acp-reuse-keys'
+import { stoppingAgentIds } from '../ephemeral-ids'
 import {
   authPickerUnavailableError,
   configIdForAgentId,
@@ -94,6 +95,20 @@ const ACP_AUTH_REQUIRED_RPC_CODE = -32000
 export function isAnyAgentAuthInFlight(): boolean {
   return inFlightAuth.size > 0
 }
+
+function currentAuthFlight(agentId: AgentId): Promise<boolean> | undefined {
+  for (const [key, flight] of inFlightAuth) {
+    if (key.startsWith(`${agentId}\0`)) return flight
+  }
+  return undefined
+}
+
+/**
+ * The authenticate flight whose first browser-open capture was authorized to
+ * auto-open, per agent. A later capture in the same flight is not authorized,
+ * and a new flight is a new object, so the mark expires with its flight.
+ */
+const autoOpenGrantedFlight = new Map<AgentId, Promise<boolean>>()
 
 /** Drop every in-flight authenticate for a torn-down agent (any method). */
 function dropInFlightAuthForAgent(agentId: AgentId): void {
@@ -186,6 +201,7 @@ export function _resetAcpAuthForTesting(): void {
   rememberedAuthMethods.clear()
   forgottenAuthMethodConfigs.clear()
   lastAuthAttempt.clear()
+  autoOpenGrantedFlight.clear()
   // Drop a queued memory write so it cannot leak into the next test.
   authMethodMemoryWriteChain = Promise.resolve()
 }
@@ -521,6 +537,7 @@ type AgentSliceState = Pick<
   | 'agents'
   | 'agentStatus'
   | 'pendingBrowserOpen'
+  | 'autoOpenBrowserUrl'
   | 'pendingBrowserConsents'
   | 'pendingRestartVersions'
   | 'spawnAgent'
@@ -569,6 +586,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
   agents: {},
   agentStatus: {},
   pendingBrowserOpen: {},
+  autoOpenBrowserUrl: {},
   pendingBrowserConsents: {},
 
   pendingRestartVersions: {},
@@ -623,13 +641,19 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
   },
 
   killAgent: async (agentId) => {
-    await acpApi.killAgent(agentId)
+    stoppingAgentIds.add(agentId)
+    try {
+      await acpApi.killAgent(agentId)
+    } finally {
+      stoppingAgentIds.delete(agentId)
+    }
     // Drop cached auth for the torn-down process so a re-spawn re-authenticates
     // (the new subprocess has unknown auth state; a stale `authenticatedAgents`
     // entry would make `authenticateBeforeSession` skip `authenticate`).
     authenticatedAgents.delete(agentId)
     dropInFlightAuthForAgent(agentId)
     lastAuthAttempt.delete(agentId)
+    autoOpenGrantedFlight.delete(agentId)
     set((s) => {
       const agents = { ...s.agents }
       const agentStatus = { ...s.agentStatus }
@@ -680,10 +704,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
   clearPendingBrowserOpen: (agentId) => {
     earlyBrowserOpen.delete(agentId)
     set((s) => {
-      if (!(agentId in s.pendingBrowserOpen)) return {}
+      if (!(agentId in s.pendingBrowserOpen) && !(agentId in s.autoOpenBrowserUrl)) return {}
       const pendingBrowserOpen = { ...s.pendingBrowserOpen }
+      const autoOpenBrowserUrl = { ...s.autoOpenBrowserUrl }
       delete pendingBrowserOpen[agentId]
-      return { pendingBrowserOpen }
+      delete autoOpenBrowserUrl[agentId]
+      return { pendingBrowserOpen, autoOpenBrowserUrl }
     })
   },
 
@@ -1060,6 +1086,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     authenticatedAgents.delete(e.agentId)
     dropInFlightAuthForAgent(e.agentId)
     lastAuthAttempt.delete(e.agentId)
+    autoOpenGrantedFlight.delete(e.agentId)
     const affected: SessionId[] = []
     const dropTranscriptIds: SessionId[] = []
     set((s) => {
@@ -1206,7 +1233,24 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       })
       return
     }
-    set((s) => ({ pendingBrowserOpen: { ...s.pendingBrowserOpen, [e.agentId]: e.url } }))
+    // Only the first capture of this agent's own sign-in flight may
+    // auto-open. A later, different capture in the same flight (an agent
+    // child looping `open https://evil/$RANDOM`) revokes it, and anything
+    // outside a flight (including a buffered pre-registration capture, which
+    // predates any authenticate dispatch) waits for a click.
+    const flight = currentAuthFlight(e.agentId)
+    const firstOfFlight = flight !== undefined && autoOpenGrantedFlight.get(e.agentId) !== flight
+    if (firstOfFlight) autoOpenGrantedFlight.set(e.agentId, flight)
+    else if (flight === undefined) autoOpenGrantedFlight.delete(e.agentId)
+    set((s) => {
+      const autoOpenBrowserUrl = { ...s.autoOpenBrowserUrl }
+      if (firstOfFlight) autoOpenBrowserUrl[e.agentId] = e.url
+      else if (autoOpenBrowserUrl[e.agentId] !== e.url) delete autoOpenBrowserUrl[e.agentId]
+      return {
+        pendingBrowserOpen: { ...s.pendingBrowserOpen, [e.agentId]: e.url },
+        autoOpenBrowserUrl
+      }
+    })
   },
 
   _onBrowserAgentTab: (e) => {

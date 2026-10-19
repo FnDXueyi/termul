@@ -15,6 +15,9 @@ interface GitChangeListProps {
   variant: 'desktop' | 'mobile' | 'column'
   stagedFiles: GitStatusDetail[]
   unstagedFiles: GitStatusDetail[]
+  /** Why the last `git status` failed; replaces the empty state, which would
+      otherwise read as a clean tree. */
+  statusError?: string
   stashes: GitStashInfo[]
   selectedFile: string | null
   selectedStaged: boolean
@@ -39,11 +42,18 @@ interface GitChangeListProps {
   onDropStash: GitActions['handleDropStash']
 }
 
+/** git's own wording when the folder has no repository: an expected state for a
+    plain project folder, not a failure. */
+function isNotARepository(statusError: string): boolean {
+  return statusError.includes('not a git repository')
+}
+
 /** Staged / Changes sections plus the Stash section, inside the scroll body. */
 export function GitChangeList({
   variant,
   stagedFiles,
   unstagedFiles,
+  statusError,
   stashes,
   selectedFile,
   selectedStaged,
@@ -141,7 +151,15 @@ export function GitChangeList({
         </SectionHeader>
         {unstagedFiles.length === 0 ? (
           <div className="px-4 py-8 text-center">
-            <p className="text-xs text-muted-foreground">No changes detected</p>
+            {statusError && !isNotARepository(statusError) ? (
+              <p role="alert" className="whitespace-pre-wrap break-words text-xs text-destructive">
+                Couldn't read changes: {statusError}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {statusError ? 'This folder is not a git repository.' : 'No changes detected'}
+              </p>
+            )}
           </div>
         ) : (
           unstagedFiles.map((file: GitStatusDetail) => {

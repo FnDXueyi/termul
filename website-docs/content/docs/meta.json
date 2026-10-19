@@ -1,0 +1,17 @@
+{
+  "title": "Termul",
+  "pages": [
+    "index",
+    "getting-started",
+    "terminals",
+    "files",
+    "git",
+    "agents",
+    "agent-setup",
+    "ssh",
+    "remote",
+    "browser",
+    "settings",
+    "troubleshooting"
+  ]
+}

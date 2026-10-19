@@ -61,6 +61,7 @@ import type { TurnEndNotice } from '@/lib/agent-chat-notify'
 import type { RegistryAgent } from '@/lib/agents/acp-registry'
 import type { PrepareChatError } from '@/lib/agents/acp-spawn-errors'
 import type { CommandState } from '@/lib/command-engine'
+import type { LogPoint } from '@/stores/agent-chat-unread-store'
 import type { QueuedPrompt } from '../prompt-queue-orchestration'
 
 /** A prompt command's state while the chat waits to confirm it (AD-6). */
@@ -371,6 +372,16 @@ export interface AcpState {
    */
   pendingBrowserOpen: Record<AgentId, string>
   /**
+   * The `pendingBrowserOpen` URL the user's own sign-in asked for: the host
+   * may open the system browser for it without a click. Set only for the
+   * first capture of an `authenticate` flight for that agent; a different
+   * later capture in the same flight revokes it. The shim shadows
+   * `open`/`xdg-open` for the agent and its children, so any other capture
+   * (a prompt-injected `open https://evil`) stays show-and-click. Cleared
+   * with `pendingBrowserOpen`.
+   */
+  autoOpenBrowserUrl: Record<AgentId, string>
+  /**
    * Agent browser automation consent prompts keyed by `requestId`
    * (`acp:browser_consent_request`). Once-per-session grant; the dialog
    * resolves each entry via `respondBrowserConsent`. Entries are host-side
@@ -499,8 +510,8 @@ export interface AcpState {
   /** ACP agent-plan entries per session (`session/update` plan, full replace). */
   plans: Record<SessionId, PlanEntry[]>
   commands: Record<SessionId, AvailableCommand[]>
-  /** Seq of the `commands_update` record behind each `commands` entry. */
-  commandsSeq: Record<SessionId, number>
+  /** Log point of the `commands_update` record behind each `commands` entry. */
+  commandsSeq: Record<SessionId, LogPoint>
   pendingPermissions: Record<string, PendingPermission> // keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
@@ -794,20 +805,6 @@ export interface AcpState {
   setMcpServerEnabled: (id: string, enabled: boolean) => Promise<void>
   deleteMcpServer: (id: string) => Promise<void>
   /**
-   * OpenPencil canvas mode (CAP-2 / AD-5): upsert the project's persisted
-   * http MCP entry pointing at the stable Termul-proxied canvas MCP
-   * endpoint. Preserves the user's `enabled` flag, refreshes the URL (the
-   * desktop agentation port is dynamic per boot). Serialized through the
-   * registry mutation queue — canvas-store calls this action, never the
-   * persistence key directly.
-   *
-   * `token` is the desktop managed token (the open response's
-   * `canvasToken` — the agentation canvas MCP routes are gated behind it);
-   * web ignores it in favor of the web-auth token, which server-side
-   * agent clients present as the /canvas/mcp bearer.
-   */
-  upsertCanvasMcpServer: (projectId: string, url: string, token?: string) => Promise<void>
-  /**
    * CAP-7: mirror the app-store MCP registry to the named project's
    * `.termul/mcp-servers.json` (best-effort, non-fatal). Called when the host
    * project list lands and when shared-live starts, so the web route reads the
@@ -937,7 +934,7 @@ export interface AcpState {
   /** CAP-2: live `acp:agent_switch` marker → append to `agentSwitches`. */
   _onAgentSwitch: (e: AgentSwitchEvent, eventSeq?: number) => void
   _onPlanUpdate: (e: PlanUpdateEvent) => void
-  _onCommandsUpdate: (e: CommandsUpdateEvent, eventSeq?: number) => void
+  _onCommandsUpdate: (e: CommandsUpdateEvent, point?: LogPoint) => void
   _onModeUpdate: (e: ModeUpdateEvent) => void
   _onConfigOptionsUpdate: (e: ConfigOptionsUpdateEvent) => void
   _onSessionInfoUpdate: (e: SessionInfoUpdateEvent) => void

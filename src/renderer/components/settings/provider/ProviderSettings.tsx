@@ -12,6 +12,8 @@ import { useProjectStore } from '@/stores/project-store'
 import type { ProjectColor } from '@/types/project'
 import { AccountNameDialog } from './AccountNameDialog'
 import { AddAccountDialog } from './AddAccountDialog'
+import { toastAccountChoiceError } from './account-choice-error'
+import { accountReadiness } from './account-status'
 import { ClaudeAccountActions } from './ClaudeAccountActions'
 import { ClaudeAccountRow, isAccountSignedOut } from './ClaudeAccountRow'
 import { oldestCheck, ProviderGroupHeader } from './ProviderGroupHeader'
@@ -86,7 +88,8 @@ export function ProviderSettings(): React.JSX.Element {
       await reload()
       toast.success(`${account.name} is now the default account`)
     } catch (err) {
-      toast.error(`Could not change the default account: ${errorText(err)}`)
+      toastAccountChoiceError(err, 'Could not change the default account')
+      await reload()
     }
   }
 
@@ -182,6 +185,7 @@ export function ProviderSettings(): React.JSX.Element {
                   builtin={account.builtin}
                   isDefault={account.id === snapshot.defaultAccountId}
                   signedOut={isAccountSignedOut(account, usage[account.id])}
+                  ready={accountReadiness(account, usage[account.id]) === 'ready'}
                   canManage={canManage}
                   busy={signingInId === account.id}
                   onSignIn={() => void signIn(account)}
@@ -224,7 +228,7 @@ export function ProviderSettings(): React.JSX.Element {
           {canManage ? (
             <>
               <Info size={12} className="shrink-0" />
-              Choose an account per project in Project Settings → Provider.
+              Choose an account per project in Project settings → Accounts.
             </>
           ) : (
             <>

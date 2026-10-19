@@ -1,7 +1,7 @@
 {
   "name": "termul-manager",
   "productName": "Termul Manager",
-  "version": "0.4.21",
+  "version": "0.4.52",
   "description": "Project-aware terminal that treats workspaces as first-class citizens",
   "author": "gnoviawan",
   "contributors": [
@@ -61,6 +61,7 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "test": "vitest run",
+    "test:e2e": "playwright test -c tests/e2e/playwright.config.ts",
     "test:shell": "bats scripts/tests",
     "test:watch": "vitest",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
@@ -83,7 +84,11 @@
     "landing:build": "bun run --cwd landing build",
     "landing:preview": "bun run --cwd landing preview",
     "build:agentation": "node scripts/build-agentation.mjs",
-    "perf": "node tools/perf/cli.ts"
+    "perf": "node tools/perf/cli.ts",
+    "docs:dev": "bun run --cwd website-docs dev",
+    "docs:build": "bun run --cwd website-docs build",
+    "docs:lint": "bun run --cwd website-docs lint",
+    "docs:typecheck": "bun run --cwd website-docs types:check"
   },
   "dependencies": {
     "@blocknote/code-block": "^0.46.2",

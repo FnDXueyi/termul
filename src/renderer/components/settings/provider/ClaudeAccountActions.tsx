@@ -13,6 +13,7 @@ interface ClaudeAccountActionsProps {
   builtin: boolean
   isDefault: boolean
   signedOut: boolean
+  ready: boolean
   canManage: boolean
   busy: boolean
   onSignIn: () => void
@@ -27,6 +28,7 @@ export function ClaudeAccountActions({
   builtin,
   isDefault,
   signedOut,
+  ready,
   canManage,
   busy,
   onSignIn,
@@ -50,7 +52,16 @@ export function ClaudeAccountActions({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-44">
-        {!isDefault && <DropdownMenuItem onSelect={onMakeDefault}>Make default</DropdownMenuItem>}
+        {!isDefault && (
+          <DropdownMenuItem disabled={!ready} onSelect={onMakeDefault}>
+            <span className="flex flex-col">
+              <span>Make default</span>
+              {!ready && (
+                <span className="text-2xs text-muted-foreground">Sign in to it first</span>
+              )}
+            </span>
+          </DropdownMenuItem>
+        )}
         {canManage && (
           <>
             <DropdownMenuItem onSelect={onSignIn}>

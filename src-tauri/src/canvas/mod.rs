@@ -1,56 +1,53 @@
-//! OpenPencil canvas mode — managed sidecar daemon subsystem.
+//! Canvas mode: the figcraft editor embedded in a Termul tab.
 //!
-//! Embeds the OpenPencil editor as a supervised `op-host-web-server
-//! --serve-web --managed` sidecar (one daemon per open `.op` document), per
-//! the daemon contract mirrored from the sibling OpenPencil repo:
+//! The editor is a prebuilt web bundle (pinned by [`pin`]) that Termul serves
+//! at `/canvas/<id>/` and drives over a control protocol; Termul owns the
+//! document file, never the editor. Everything here is **Tauri-free** so the
+//! desktop (`lib.rs`) and the standalone `termul-server` share one
+//! implementation. Boundary logging uses the `log` crate (desktop seam
+//! convention); the web route mounts log their own seams. Document contents
+//! and session tokens are never logged.
 //!
-//! - argv: `--serve-web --managed --port 0 --file <doc> --allow-origin <origin>`
-//! - first stdout line is the handshake JSON `{"ok":true,"port":N,"token":
-//!   "<hex>","version":"…"}` (10s timeout);
-//! - stdin-EOF is the shutdown lease (kill after 3s grace);
-//! - the daemon binds loopback only.
-//!
-//! Everything in this module is **Tauri-free** so both the desktop
-//! (`lib.rs`) and the standalone `termul-server` (`server_main.rs`) compose
-//! the same pool. Boundary logging uses the `log` crate (desktop seam
-//! convention); the web/agentation route mounts log their own seams.
-//! Document contents and lifecycle tokens are never logged.
-//!
-//! - [`managed`] — binary resolution, argv, spawn + handshake, dispose.
-//! - [`pool`] — `CanvasDaemonPool`: doc-keyed map, coalesced acquires,
-//!   respawn-once-then-evict crash policy.
-//! - [`mcp_proxy`] — shared HTTP proxy to the active daemon (`/mcp` + path
-//!   proxy, streaming via reqwest).
+//! - [`static_server`] — bundle serving, the per-canvas token store and its
+//!   path gate, and the open/close sequences both transports share.
+//! - [`persistence`] — the mount registry: load floor, autosave debounce,
+//!   saved version and the atomic document write (AD-23, AD-31).
+//! - [`pin`] — the figcraft bundle tag this build expects.
+//! - [`bundle_path`] — the `/canvas/<id>/<token>/...` path shape, and the
+//!   redaction every log line naming a request path goes through.
 
-pub mod managed;
-pub mod mcp_proxy;
-pub mod pool;
+pub mod bundle_path;
+pub mod doc_path;
+pub mod persistence;
+pub mod pin;
+pub mod static_server;
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod bundle_path_tests;
+#[cfg(test)]
+mod doc_path_tests;
+#[cfg(test)]
+mod loopback_log_tests;
+#[cfg(test)]
+mod pin_tests;
+#[cfg(test)]
+mod static_server_tests;
+#[cfg(test)]
+mod tests;
 
 use serde::Serialize;
 
-pub use managed::{DaemonSpawner, RealDaemonSpawner};
-pub use pool::CanvasDaemonPool;
-
-/// Stable SCREAMING_SNAKE error code: the `op-host-web-server` binary could
-/// not be resolved (`TERMUL_OP_HOST_SERVER` / `TERMUL_OPENPENCIL_ROOT` /
-/// sibling checkout).
-pub const CODE_BINARY_NOT_FOUND: &str = "BINARY_NOT_FOUND";
-/// The daemon did not print a handshake line within the 10s deadline.
-pub const CODE_HANDSHAKE_TIMEOUT: &str = "HANDSHAKE_TIMEOUT";
-/// The first stdout line was not a valid handshake JSON document.
-pub const CODE_HANDSHAKE_INVALID: &str = "HANDSHAKE_INVALID";
-/// The child could not be spawned (non-NotFound IO error).
-pub const CODE_SPAWN_FAILED: &str = "SPAWN_FAILED";
-/// No live daemon backs the requested proxy/command surface.
-pub const CODE_DAEMON_DOWN: &str = "DAEMON_DOWN";
 /// The doc path could not be canonicalized.
 pub const CODE_PATH_VALIDATION_FAILED: &str = "PATH_VALIDATION_FAILED";
-/// The canvas was closed (or the pool shut down) mid-operation.
+/// The canvas was closed mid-operation.
 pub const CODE_CANVAS_CLOSED: &str = "CANVAS_CLOSED";
-/// A save request failed at the daemon transport or protocol level.
+/// The canvas is running its unmount sequence (AD-31 quiesce).
+pub const CODE_CANVAS_CLOSING: &str = "CANVAS_CLOSING";
+/// Another renderer holds the canvas's mount lease (AD-30), and taking it
+/// over failed because the holder could not save.
+pub const CODE_CANVAS_OPEN_ELSEWHERE: &str = "CANVAS_OPEN_ELSEWHERE";
+/// A save failed: a mount's flush before unmount (the mount stays open and
+/// the user is asked).
 pub const CODE_SAVE_FAILED: &str = "SAVE_FAILED";
 /// The web canvas session token could not be generated (CSPRNG failure).
 pub const CODE_TOKEN_GENERATION_FAILED: &str = "TOKEN_GENERATION_FAILED";
@@ -81,74 +78,7 @@ impl std::fmt::Display for CanvasError {
 
 impl std::error::Error for CanvasError {}
 
-/// Snapshot of one live managed daemon (no token — never leaves the host).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasDaemonInfo {
-    pub doc_key: String,
-    pub port: u16,
-    pub version: String,
-}
-
-/// Result of opening a canvas. Desktop returns the loopback embed URL (the
-/// renderer iframes it directly — no proxy); web returns the same-origin
-/// proxy path plus the `canvasId` the proxy routes on. The `canvas_token`
-/// value differs per surface — see the field doc.
-///
-/// Embed URL shapes (both append params as raw query text — the editor
-/// refuses URL-encoded `embed%3Dvscode`):
-/// - desktop: `http://127.0.0.1:<port>/?embed=vscode`
-/// - web: `/canvas/<canvasId>/?embed=vscode&ct=<32-hex>` — the `ct` canvas
-///   session token authenticates the iframe's `/canvas/<id>/*` requests
-///   through the canvas-token gate (`web::canvas_api::canvas_token_gate`).
-///
-/// On web the same token is ALSO returned as `canvas_token` so the
-/// renderer can set it as the same-origin PER-CANVAS cookie
-/// `op_canvas_ct_<canvasId>`: the cookie authenticates the editor's
-/// root-relative traffic — the root canvas routes `/pkg/*`, `/canvaskit/*`,
-/// `/api/*` (the editor wasm derives its daemon base from
-/// `window.location.origin` and uses absolute paths, so a
-/// `/canvas/<id>/` iframe still requests those at the server root) — and
-/// the cookie path of `/canvas/mcp`. The per-canvas name keeps sibling
-/// canvases isolated (canvas B's cookie never authenticates canvas A's
-/// traffic). It is dropped with the pool entry on close/evict, so a stale
-/// token yields 401.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasOpenInfo {
-    pub embed_url: String,
-    /// Stable Termul-proxied MCP endpoint. Desktop: the id-scoped agentation
-    /// route `http://127.0.0.1:<port>/canvas/<canvasId>/mcp` (agents of
-    /// project A never reach project B's canvas; the id is deterministic so
-    /// the URL is stable across re-opens). Web: the global `/canvas/mcp`
-    /// (bearer-or-cookie authed, routes to the active canvas). `None` when
-    /// the desktop agentation server is unavailable.
-    pub mcp_url: Option<String>,
-    /// Canonicalized absolute doc path (the pool's daemon key).
-    pub doc_key: String,
-    /// Web-only: the project-derived id the `/canvas/<id>/*` proxy routes on.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub canvas_id: Option<String>,
-    /// The canvas credential. **Desktop:** the daemon's managed (handshake)
-    /// token — the renderer/agents present it as the `Authorization: Bearer`
-    /// value on the agentation `/canvas(/<canvasId>)/mcp` mounts. **Web:**
-    /// the canvas session token — the `ct` embed param and the value the
-    /// renderer sets as the same-origin per-canvas `op_canvas_ct_<canvasId>`
-    /// cookie (root canvas routes + the `/canvas/mcp` cookie path). Never
-    /// logged.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub canvas_token: Option<String>,
-}
-
-/// Pool status for `canvas_status` / `POST /canvas/status`-style queries.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasStatus {
-    pub daemons: Vec<CanvasDaemonInfo>,
-    pub active_doc_key: Option<String>,
-}
-
-/// Deterministic, URL-safe proxy id for a project's canvas (singleton per
+/// Deterministic, URL-safe id for a project's canvas (singleton per
 /// project, so the id is derived from the project — not the doc — and stays
 /// stable across doc re-binds). FNV-1a 64 of the project id, hex-encoded.
 pub fn canvas_id_for_project(project_id: &str) -> String {

@@ -42,6 +42,7 @@ import type {
 } from '@/lib/acp-api'
 import type { SessionPayload } from '@/lib/acp-history-persistence'
 import type { AcpRuntimeAvailability } from '@/lib/agents/supported-acp-agents'
+import type { CanvasGatewayClient } from './canvas-gateway-client'
 import type { WatchClient } from './watch-client'
 
 /**
@@ -436,6 +437,11 @@ export interface AcpTransport {
    */
   readonly watches?: WatchClient
   /**
+   * The canvas gateway's renderer leg (mount reports, forwarded agent canvas
+   * calls), on every carrier.
+   */
+  readonly canvas?: CanvasGatewayClient
+  /**
    * Tell the host this surface read `sessionId` up to `seq` (the newest turn
    * end it showed) of the log incarnation `logEpoch`. Resolves to the shared
    * marker as it stands; every `chat_reads` watcher hears when it moves. WS:
@@ -495,8 +501,7 @@ export interface AcpTransport {
   setRecoveryHandler?(
     handler: (
       recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
-      reopenGeneration?: number,
-      logEpochChanged?: boolean
+      reopenGeneration?: number
     ) => Promise<void>
   ): void
   /**

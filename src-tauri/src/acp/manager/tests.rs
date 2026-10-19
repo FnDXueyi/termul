@@ -403,6 +403,23 @@ async fn session_reopen_auth_required_is_prefixed() {
     assert_eq!(state.lock().session_root("sess-auth"), None);
 }
 
+/// Issue #1303: an agent that no longer has the session (another Claude
+/// account) answers `session/resume` with `ResourceNotFound` (-32002).
+#[tokio::test]
+async fn session_reopen_resource_not_found_is_prefixed() {
+    let state = Mutex::new(DriverState::new());
+    let outcome = run_session_reopen("session/resume", "sess-gone", "/work", &state, async {
+        Err::<ResumeSessionResponse, _>(agent_client_protocol::Error::resource_not_found(Some(
+            "sess-gone".to_string(),
+        )))
+    })
+    .await;
+    assert_eq!(
+        outcome.unwrap_err(),
+        "ACP_RESOURCE_NOT_FOUND: Resource not found: {\n  \"uri\": \"sess-gone\"\n}"
+    );
+}
+
 #[tokio::test]
 async fn session_resume_reopen_preserves_omitted_fields() {
     let state = Mutex::new(DriverState::new());
@@ -2630,6 +2647,72 @@ fn failed_turn_emits_agent_error_then_one_terminator() {
     assert_eq!(done[0].1["turnId"], "t1");
     assert_eq!(done[1].1["stopReason"], "error");
     assert!(done[1].1.get("turnId").is_none());
+    assert_eq!(
+        done[0].1["error"]["message"],
+        "turn idle timeout: no agent activity for 5s"
+    );
+    assert_eq!(done[1].1["error"]["message"], "rpc failed");
+}
+
+fn failed_turn_terminator(error: agent_client_protocol::Error) -> serde_json::Value {
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    emit_turn_outcome(
+        &sinks,
+        &AgentId("a1".to_string()),
+        &SessionId::new("s1"),
+        Some("t1".to_string()),
+        &Err(events::AcpErrorDetail::from(error)),
+    );
+    let mut done = terminators(&sink);
+    assert_eq!(done.len(), 1);
+    done.remove(0).1
+}
+
+/// Issue #1298 review: the terminator is durable and replayed on reopen, so it
+/// keeps the RPC error's own message and code, never the `data` that the
+/// error's `Display` appends to the live `agent_error` message.
+#[test]
+fn a_failed_turn_terminator_keeps_no_secret_from_the_error_data() {
+    let error = agent_client_protocol::Error::new(-32603, "Internal error")
+        .data(serde_json::json!({"headers": {"authorization": "Bearer sk-test"}}));
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"],
+        serde_json::json!({"message": "Internal error", "code": -32603})
+    );
+    assert!(!terminator.to_string().contains("sk-test"), "{terminator}");
+}
+
+#[test]
+fn a_failed_turn_terminator_masks_a_secret_in_the_error_message() {
+    let error =
+        agent_client_protocol::Error::new(-32603, "upstream said Bearer abcdefgh12345678 expired");
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"]["message"],
+        "upstream said Bearer [redacted] expired"
+    );
+}
+
+#[test]
+fn a_failed_turn_terminator_masks_a_cookie_in_the_error_message() {
+    let error = agent_client_protocol::Error::new(
+        -32603,
+        "upstream 401, sent Cookie: sid=9f82b5e7c4a69130; theme=dark",
+    );
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"]["message"],
+        "upstream 401, sent Cookie: [redacted]"
+    );
+}
+
+#[test]
+fn a_failed_turn_terminator_caps_a_huge_error_message() {
+    let error = agent_client_protocol::Error::new(-32603, "x".repeat(100 * 1024));
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(terminator["error"]["message"], "x".repeat(1_000));
 }
 
 /// Connection teardown with active turns: one `crashed` terminator per
@@ -2802,4 +2885,39 @@ async fn close_waits_for_the_turn_terminator_and_gives_up_after_the_bound() {
     let (_never_tx, never_rx) = oneshot::channel::<()>();
     let error = await_turn_terminator(Some(never_rx)).await.unwrap_err();
     assert!(error.contains("timed out"), "{error}");
+}
+
+/// Issue #1345: a new chat refreshes an expired MCP OAuth token and attaches
+/// the fresh bearer instead of deleting the stored refresh token.
+#[tokio::test]
+async fn new_session_injects_a_refreshed_oauth_token() {
+    use crate::acp::mcp_oauth;
+    let (url, _requests) = mcp_oauth::tests::serve_token_endpoint(serde_json::json!({
+        "access_token": "fresh-access",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }))
+    .await;
+    mcp_oauth::store_token(&url, &mcp_oauth::tests::expired_token_with_refresh(&url)).unwrap();
+
+    let servers = inject_oauth_tokens(vec![McpServer::Http(
+        agent_client_protocol::schema::v1::McpServerHttp::new("oauth-server", url.clone()),
+    )])
+    .await;
+    let stored = mcp_oauth::load_stored_token(&url).unwrap();
+    mcp_oauth::delete_stored_token(&url).unwrap();
+
+    let McpServer::Http(http) = &servers[0] else {
+        panic!("the HTTP server stays an HTTP server");
+    };
+    let headers: Vec<(&str, &str)> = http
+        .headers
+        .iter()
+        .map(|header| (header.name.as_str(), header.value.as_str()))
+        .collect();
+    assert_eq!(headers, vec![("Authorization", "Bearer fresh-access")]);
+    assert_eq!(
+        stored.and_then(|token| token.refresh_token).as_deref(),
+        Some("stored-refresh")
+    );
 }

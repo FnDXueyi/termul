@@ -118,6 +118,19 @@ bun run test
 bun run test:watch
 ```
 
+### Web end-to-end suite
+
+`tests/e2e` holds Playwright specs that drive a release `termul-server` and the built web client against a fake ACP agent (`tests/e2e/fake-longrun-agent.ts`). The suite starts its own server on `127.0.0.1:8188`, so it needs two builds first:
+
+```bash
+bun run build:web
+cargo build --release --bin termul-server --features standalone-server   # run in src-tauri
+bun run playwright install chromium
+bun run test:e2e
+```
+
+Pass spec names to run a subset, for example `bun run test:e2e agent-survival crash-recovery`.
+
 ### Direct Tauri CLI Access
 
 ```bash
@@ -221,6 +234,8 @@ The file explorer and editor support live file watching through the filesystem A
 - `cargo test`
 - `cargo clippy --all-targets -- -D warnings`
 - frontend Tauri build verification
+
+`.github/workflows/e2e.yml` builds `dist-web/` and a release `termul-server`, then runs the Playwright suite. It runs the ACP lifecycle specs on a pull request that changes ACP, relay, protocol or e2e files, and daily. A manual dispatch takes a `specs` input to run other specs. The job uploads Playwright traces when it fails.
 
 ### Releases
 

@@ -560,6 +560,12 @@ impl AcpManager {
     pub fn persistence(&self) -> Option<Arc<SessionPersistence>> {
         self.persistence.clone()
     }
+
+    /// The canvas call router renderers report their mounts and replies to.
+    #[must_use]
+    pub fn canvas_router(&self) -> Arc<crate::acp::host_mcp::canvas::CanvasRouter> {
+        self.host_plan_server.canvas_router()
+    }
     /// Host-authored durable agent-switch marker (CAP-2): the relay numbers,
     /// persists and delivers it through this manager's sinks, then the flush
     /// is the durability boundary. The relay is the only sink on desktop and on
@@ -844,6 +850,7 @@ impl AcpManager {
                 );
                 return Err(with_stderr_tail(reason.to_string(), &stderr_ring));
             }
+            self.host_plan_server.name_agent(&agent_id.0, &config.name);
             agents.insert(
                 agent_id.clone(),
                 AgentEntry {
@@ -1053,7 +1060,7 @@ impl AcpManager {
         let outcome = async {
             // Inject OAuth Bearer tokens into HTTP/SSE MCP server configs so
             // authenticated servers (e.g., Mobbin) work in agent sessions.
-            let combined_mcp_servers = inject_oauth_tokens(combined_mcp_servers);
+            let combined_mcp_servers = inject_oauth_tokens(combined_mcp_servers).await;
 
             gate_mcp_servers(&caps, &combined_mcp_servers)?;
             let tx = self.command_tx(agent_id)?;
@@ -1116,7 +1123,7 @@ impl AcpManager {
         gate_load_session(&caps)?;
         let directories = filter_additional_directories(&caps, &cwd, &additional_directories);
         let (mcp_servers, plan_token) =
-            self.prepare_reopen_mcp(agent_id, &session_id.0, &caps, mcp_servers)?;
+            self.prepare_reopen_mcp(agent_id, &session_id.0, &caps, mcp_servers).await?;
         let tx = self.command_tx(agent_id)?;
         let outcome = send_command(&tx, |reply| AcpCommand::LoadSession {
             session_id,
@@ -1158,7 +1165,7 @@ impl AcpManager {
         gate_resume_session(&caps)?;
         let directories = filter_additional_directories(&caps, &cwd, &additional_directories);
         let (mcp_servers, plan_token) =
-            self.prepare_reopen_mcp(agent_id, &session_id.0, &caps, mcp_servers)?;
+            self.prepare_reopen_mcp(agent_id, &session_id.0, &caps, mcp_servers).await?;
         let tx = self.command_tx(agent_id)?;
         let outcome = send_command(&tx, |reply| AcpCommand::ResumeSession {
             session_id,
@@ -1182,7 +1189,7 @@ impl AcpManager {
     /// `Some` prepends the host plan server, injects OAuth headers, and
     /// gates transports. The plan token is bound to the known session id.
     /// The caller drops the token when the reopen fails.
-    fn prepare_reopen_mcp(
+    async fn prepare_reopen_mcp(
         &self,
         agent_id: &AgentId,
         session_id: &str,
@@ -1202,7 +1209,7 @@ impl AcpManager {
         // that can carry bearer tokens. Logging that value, including its
         // length, is clear-text logging of the tokens.
         let server_count = combined.len();
-        let combined = inject_oauth_tokens(combined);
+        let combined = inject_oauth_tokens(combined).await;
         if let Err(error) = gate_mcp_servers(caps, &combined) {
             self.host_plan_server.unregister_by_token(&token);
             return Err(error);

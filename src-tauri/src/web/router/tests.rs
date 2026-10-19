@@ -714,34 +714,27 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
         "/acp/catalog",
         "/acp/install",
         "/worktree/list",
-        // OpenPencil canvas mode: the renderer-facade API routes stay
-        // bearer-gated…
+        // The renderer-facade API routes stay bearer-gated…
         "/canvas/open",
         "/canvas/close",
-        "/canvas/save",
+        "/canvas/read-document",
+        "/canvas/document-loaded",
+        "/canvas/dirty-changed",
+        "/canvas/set-visible",
+        "/canvas/write-snapshot",
+        "/canvas/disk-changed",
+        "/canvas/resolve-conflict",
+        "/canvas/crashed",
     ] {
         assert!(requires_token(gated), "{gated} must require the token");
     }
-    // …but the canvas-credential surface is exempt from the bearer gate
-    // (browser iframes cannot send Authorization headers):
-    // - `/canvas/<id>/*` embed/proxy paths (the `?ct=` canvas token),
-    // - `/canvas/mcp` (bearer OR `op_canvas_ct` cookie, canvas layer),
-    // - the ROOT canvas routes `/pkg|/canvaskit|/api` (not under any gated
-    //   prefix; the `op_canvas_ct` cookie middleware owns them).
+    // …but the `/canvas/<id>/<token>/*` bundle paths (the canvas token) are
+    // exempt from the bearer gate (browser iframes cannot send Authorization
+    // headers).
     for canvas_credentialed in [
         "/canvas/cv0123456789abcdef",
         "/canvas/cv0123456789abcdef/",
-        "/canvas/cv0123456789abcdef/pkg/op_host_web.js",
-        "/canvas/cv0123456789abcdef/api/mcp/events",
-        "/canvas/mcp",
-        "/pkg",
-        "/pkg/",
-        "/pkg/op_host_web.js",
-        "/canvaskit",
-        "/canvaskit/canvaskit.js",
-        "/api",
-        "/api/",
-        "/api/mcp/events",
+        "/canvas/cv0123456789abcdef/0123/assets/app.js",
     ] {
         assert!(
             !requires_token(canvas_credentialed),
@@ -951,7 +944,7 @@ async fn api_routes_keep_priority_over_static_fallback() {
     assert_eq!(parsed["status"], "ok");
 }
 
-// --- OpenPencil canvas routes (spec-openpencil-canvas-mode) ---
+// --- Canvas routes ---
 
 #[tokio::test]
 async fn canvas_routes_require_auth_when_gated() {
@@ -982,43 +975,14 @@ async fn canvas_routes_require_auth_when_gated() {
         "/canvas/open rejected by the outer bearer gate"
     );
 
-    // `/canvas/mcp` is EXEMPT from the bearer gate — its rejection comes
-    // from the canvas MCP layer itself (bearer OR per-canvas cookie).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/canvas/mcp")
-                .extension(axum::extract::ConnectInfo(SocketAddr::from((
-                    [127, 0, 0, 1],
-                    54321,
-                ))))
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .expect("build request"),
-        )
-        .await
-        .expect("router response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["code"], "UNAUTHORIZED");
-    assert_eq!(
-        parsed["error"], "canvas mcp requires a web auth bearer token or canvas cookie",
-        "rejected by the canvas MCP layer, not the bearer gate"
-    );
-
-    // The embed/proxy paths are exempt too — they pass straight through to
-    // the canvas-token middleware (`ct` rejection).
+    // The bundle paths are exempt too — they pass straight through to the
+    // canvas-token check (`ct` rejection).
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/canvas/cv0123456789abcdef/pkg/x.js")
+                .uri("/canvas/cv0123456789abcdef/assets/x.js")
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -1032,91 +996,47 @@ async fn canvas_routes_require_auth_when_gated() {
     assert_eq!(parsed["code"], "UNAUTHORIZED");
     assert_eq!(
         parsed["error"], "canvas session token missing or invalid",
-        "rejected by the canvas-token gate, not the bearer gate"
+        "rejected by the canvas-token check, not the bearer gate"
     );
-
-    // The root canvas routes are not bearer gated either — no daemon on
-    // this fixture → typed 502 DAEMON_DOWN (proving routing reached the
-    // canvas handler, not a 401 from the outer gate).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/pkg/op_host_web.js")
-                .header("cookie", "op_canvas_ct_cv0123456789abcdef=whatever")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("router response");
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["code"], "DAEMON_DOWN");
-
-    // With the bearer token the /canvas/mcp request reaches the canvas
-    // handler, which (no pool on this fixture) reports the typed 502
-    // DAEMON_DOWN.
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/canvas/mcp")
-                .extension(axum::extract::ConnectInfo(SocketAddr::from((
-                    [127, 0, 0, 1],
-                    54321,
-                ))))
-                .header("authorization", "Bearer t0ken")
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .expect("build request"),
-        )
-        .await
-        .expect("router response");
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["code"], "DAEMON_DOWN");
 }
 
 #[tokio::test]
-async fn non_canvas_root_paths_fall_through_to_spa_unchanged() {
-    // Only `/pkg|/canvaskit|/api` are canvas routes; anything else at the
-    // root still falls through to the static SPA fallback (here: the
-    // ServeDir index.html fallback from the fixture).
+async fn root_paths_fall_through_to_spa_including_the_retired_daemon_relays() {
+    // `/pkg`, `/canvaskit` and `/api` were root relays to the retired
+    // canvas daemon. They are plain SPA paths now (here: the ServeDir
+    // index.html fallback from the fixture).
     let dir = TempDir::new("canvas-spa-fallthrough");
     fs::write(dir.path().join("index.html"), "<html>fixture</html>").expect("index");
-    let resp = test_router_with_fixture(dir.path())
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/some/other/root/path")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("router response");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    assert_eq!(
-        String::from_utf8(body.to_vec()).expect("utf8"),
-        "<html>fixture</html>",
-        "SPA fallback serves index.html for non-canvas root paths"
-    );
+    for uri in [
+        "/some/other/root/path",
+        "/pkg/x.js",
+        "/canvaskit/x.js",
+        "/api/mcp/events",
+    ] {
+        let resp = test_router_with_fixture(dir.path())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8"),
+            "<html>fixture</html>",
+            "SPA fallback serves index.html for {uri}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn ungated_canvas_open_degrades_to_daemon_down_without_pool() {
-    // `router_with_static` never attaches a pool, so the canvas routes run
-    // in degraded mode: IpcBody failure with HTTP 200 (the app-level error
-    // contract, mirroring the Tauri command envelope).
+async fn ungated_canvas_open_refuses_a_doc_outside_every_project() {
     let dir = TempDir::new("canvas-ungated");
     let resp = test_router_with_fixture(dir.path())
         .oneshot(
@@ -1129,7 +1049,7 @@ async fn ungated_canvas_open_degrades_to_daemon_down_without_pool() {
                 ))))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"docPath":"C:/proj/design.op","projectId":"p-1"}"#,
+                    r#"{"docPath":"C:/proj/design.figcraft","projectId":"p-1","clientInstanceId":"tab"}"#,
                 ))
                 .expect("build request"),
         )
@@ -1141,7 +1061,7 @@ async fn ungated_canvas_open_degrades_to_daemon_down_without_pool() {
         .expect("read body");
     let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     assert_eq!(parsed["success"], false);
-    assert_eq!(parsed["code"], "DAEMON_DOWN");
+    assert_eq!(parsed["code"], "PATH_VALIDATION_FAILED");
 }
 
 fn router_for_origins(dir: &Path, origins: OriginPolicy) -> Router {

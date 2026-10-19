@@ -1194,6 +1194,119 @@ describe('acp provider authentication & recovery', () => {
     }
   })
 
+  it('authorizes auto-open only for a capture that arrives while a sign-in is in flight', async () => {
+    const listeners = new Map<string, (payload: unknown) => void>()
+    let finishAuth: () => void = () => {}
+    const authenticate = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishAuth = resolve
+        })
+    )
+    _setAcpTransportForTests({
+      onEvent: vi.fn((name: string, callback: (payload: unknown) => void) => {
+        listeners.set(name, callback)
+        return () => listeners.delete(name)
+      }),
+      authenticate,
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    const teardown = initAcpEventListeners()
+    try {
+      seedLiveAgent('agent-1', [{ id: 'devin-browser', name: 'Browser sign-in', type: 'agent' }])
+      const capture = (url: string) =>
+        listeners.get('acp:browser_open_request')?.({ agentId: 'agent-1', url })
+
+      capture('https://evil.example.com/')
+      expect(useAcpStore.getState().pendingBrowserOpen['agent-1']).toBe('https://evil.example.com/')
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBeUndefined()
+
+      const signIn = useAcpStore.getState().authenticateAgent('agent-1', 'devin-browser')
+      capture('https://auth.example.com/login?state=abc')
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBe(
+        'https://auth.example.com/login?state=abc'
+      )
+
+      finishAuth()
+      await signIn
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBeUndefined()
+
+      capture('https://evil.example.com/after')
+      expect(useAcpStore.getState().pendingBrowserOpen['agent-1']).toBe(
+        'https://evil.example.com/after'
+      )
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBeUndefined()
+    } finally {
+      teardown()
+      _resetAcpTransportForTests()
+    }
+  })
+
+  it('authorizes only the first capture of a sign-in flight and revokes on a different later one', async () => {
+    const listeners = new Map<string, (payload: unknown) => void>()
+    const finishers: Array<() => void> = []
+    const authenticate = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishers.push(resolve)
+        })
+    )
+    _setAcpTransportForTests({
+      onEvent: vi.fn((name: string, callback: (payload: unknown) => void) => {
+        listeners.set(name, callback)
+        return () => listeners.delete(name)
+      }),
+      authenticate,
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    const teardown = initAcpEventListeners()
+    try {
+      seedLiveAgent('agent-1', [{ id: 'devin-browser', name: 'Browser sign-in', type: 'agent' }])
+      const capture = (url: string) =>
+        listeners.get('acp:browser_open_request')?.({ agentId: 'agent-1', url })
+
+      const firstFlight = useAcpStore.getState().authenticateAgent('agent-1', 'devin-browser')
+      capture('https://auth.example.com/first')
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBe(
+        'https://auth.example.com/first'
+      )
+
+      capture('https://evil.example.com/second')
+      expect(useAcpStore.getState().pendingBrowserOpen['agent-1']).toBe(
+        'https://evil.example.com/second'
+      )
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBeUndefined()
+
+      capture('https://evil.example.com/third')
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBeUndefined()
+
+      finishers[0]()
+      await firstFlight
+
+      const secondFlight = useAcpStore.getState().authenticateAgent('agent-1', 'devin-browser')
+      capture('https://auth.example.com/retry')
+      expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBe(
+        'https://auth.example.com/retry'
+      )
+      finishers[1]()
+      await secondFlight
+    } finally {
+      teardown()
+      _resetAcpTransportForTests()
+    }
+  })
+
+  it('revokes the auto-open authorization when a later capture is not part of a sign-in', () => {
+    seedLiveAgent('agent-1', [])
+    useAcpStore.setState((s) => ({
+      pendingBrowserOpen: { ...s.pendingBrowserOpen, 'agent-1': 'https://auth.x/ok' },
+      autoOpenBrowserUrl: { ...s.autoOpenBrowserUrl, 'agent-1': 'https://auth.x/ok' }
+    }))
+    useAcpStore.getState()._onBrowserOpenRequest({ agentId: 'agent-1', url: 'https://evil.x/' })
+    expect(useAcpStore.getState().pendingBrowserOpen['agent-1']).toBe('https://evil.x/')
+    expect(useAcpStore.getState().autoOpenBrowserUrl['agent-1']).toBeUndefined()
+  })
+
   it('clears pendingBrowserOpen on killAgent and on agent disconnect', async () => {
     seedLiveAgent('agent-1', [])
     useAcpStore.setState((s) => ({
@@ -1269,6 +1382,7 @@ describe('acp provider authentication & recovery', () => {
       .getState()
       ._onAgentSpawned({ agentId: 'agent-early', capabilities: {}, authMethods: [] })
     expect(useAcpStore.getState().pendingBrowserOpen['agent-early']).toBe('https://auth.x/early')
+    expect(useAcpStore.getState().autoOpenBrowserUrl['agent-early']).toBeUndefined()
     // Teardown clears a still-buffered request too.
     useAcpStore
       .getState()

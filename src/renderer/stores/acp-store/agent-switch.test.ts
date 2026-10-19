@@ -166,6 +166,7 @@ import {
   _handoffOnlyTurnIdsForTesting,
   _installTransportRecoveryForTesting,
   _resetAcpAuthForTesting,
+  _resetBackfillForTesting,
   _resetCoalesceForTesting,
   _resetEphemeralSessionIdsForTesting,
   _resetHistorySeqWatermarksForTesting,
@@ -178,6 +179,7 @@ import {
   prepareChatKey,
   useAcpStore
 } from '@/stores/acp-store'
+import { spliceSwitchTranscript } from './helpers'
 import {
   activeWirePromptTurns,
   invalidateSessionReopen,
@@ -194,6 +196,7 @@ import {
   seedOptionsSession,
   seedSession
 } from './testkit'
+import type { ChatMessage } from './types'
 
 // --- Story 3 (spec-in-chat-agent-switch): switchAgent orchestration --------
 
@@ -2353,6 +2356,11 @@ describe('switchAgent (story 3)', () => {
       const sendPrompt = vi.fn(async () => 'end_turn')
       _setAcpTransportForTests({
         historyMode: () => 'server',
+        // A chat never reopens on the agent that hosts the armed switch's warm session.
+        spawnAgent: vi.fn(async () => ({
+          agentId: `${agentId}-own`,
+          capabilities: { loadSession: true }
+        })),
         loadSession: vi.fn(async () => ({})),
         recordAgentSwitch: vi.fn(async () => {}),
         sendPrompt,
@@ -2379,6 +2387,7 @@ describe('switchAgent (story 3)', () => {
 
     beforeEach(() => {
       _clearPayloadCacheForTesting()
+      _resetBackfillForTesting()
     })
 
     it('MULTI_HOP_RESPLICE: reinstalling C of a live A→B→C chain restores both earlier bands in order', async () => {
@@ -2429,6 +2438,220 @@ describe('switchAgent (story 3)', () => {
       expect((useAcpStore.getState().agentSwitches['s-3'] ?? []).map((sw) => sw.id)).toEqual([
         'switch-splice:s-old:switch:seq-2',
         'switch-splice:s-new:switch:seq-2'
+      ])
+    })
+
+    it('SCROLL_BACK_ACROSS_HOPS: scrolling up a trimmed A→B→C chat pages both earlier agents back in order', async () => {
+      const band = (idPrefix: string, label: string, count: number): Row[] =>
+        Array.from({ length: count }, (_, i) => ({
+          id: `${idPrefix}${i + 1}`,
+          role: i % 2 === 0 ? 'user' : 'agent',
+          text: `${label} ${i + 1}`,
+          seq: i + 1
+        }))
+      const aRows = band('a', 'A', 60)
+      const bRows = band('b', 'B', 60)
+      const cRows = band('c', 'C', MAX_LIVE_WINDOW_MESSAGES)
+      useAcpStore.setState({ messages: { 's-old': rows(aRows) } })
+      await liveSwitch('s-old', 'cfg-new', 'agent-new', 's-new')
+      useAcpStore.setState((s) => ({
+        messages: { ...s.messages, 's-new': [...(s.messages['s-new'] ?? []), ...rows(bRows)] }
+      }))
+      useAcpStore.setState({
+        agentConfigs: [
+          { id: 'cfg-old', name: 'Gemini', command: 'gemini', args: [], env: {} },
+          { id: 'cfg-new', name: 'Claude', command: 'claude', args: [], env: {} },
+          { id: 'cfg-3', name: 'Droid', command: 'droid', args: [], env: {} }
+        ],
+        configToLiveAgent: {
+          [agentReuseKey('cfg-new', '/work')]: 'agent-new',
+          [detachedReuseKey(agentReuseKey('cfg-old', '/work'), 'agent-old')]: 'agent-old'
+        }
+      })
+      workspaceStateRef.current.root = {
+        type: 'leaf',
+        id: 'pane-1',
+        activeTabId: 'chat-s-new',
+        tabs: [{ type: 'agent-chat', id: 'chat-s-new', sessionId: 's-new' }]
+      }
+      await liveSwitch('s-new', 'cfg-3', 'agent-3', 's-3')
+      seedHistory('s-old', 'agent-old', 'cfg-old', aRows, [marker(61, 'cfg-new', 's-new')])
+      // The desktop cache of A predates A's last two turns; only the host has them.
+      const hostA = getCachedSessionPayload('s-old')
+      seedHistory('s-old', 'agent-old', 'cfg-old', aRows.slice(0, 58))
+      vi.mocked(reloadSessionPayloadFromHost).mockImplementation(async (id) =>
+        id === 's-old' ? (hostA ?? null) : (getCachedSessionPayload(id) ?? null)
+      )
+      seedHistory('s-new', 'agent-new', 'cfg-new', bRows, [marker(61, 'cfg-3', 's-3')])
+      seedHistory('s-3', 'agent-3', 'cfg-3', cRows)
+      useAcpStore.setState((s) => ({
+        messages: { ...s.messages, 's-3': [...(s.messages['s-3'] ?? []), ...rows(cRows)] }
+      }))
+      useAcpStore.getState().clearSessionBackfill('s-3')
+      expect(texts('s-3')[0]).toBe('C 1')
+
+      for (let page = 0; page < 10; page++) {
+        await useAcpStore.getState().loadOlderMessages('s-3', 50)
+      }
+
+      const label = (name: string, count: number): string[] =>
+        Array.from({ length: count }, (_, i) => `${name} ${i + 1}`)
+      expect(texts('s-3')).toEqual([
+        ...label('A', 60),
+        ...label('B', 60),
+        ...label('C', MAX_LIVE_WINDOW_MESSAGES)
+      ])
+      const window = useAcpStore.getState().messages['s-3'] ?? []
+      expect(new Set(window.map((m) => m.id)).size).toBe(window.length)
+      const seqs = window.map((m) => m.seq ?? Number.NaN)
+      expect(seqs.every((seq, i) => i === 0 || seq > seqs[i - 1])).toBe(true)
+      const separatorSeq = (newSessionId: string): number =>
+        useAcpStore.getState().agentSwitches['s-3']?.find((sw) => sw.newSessionId === newSessionId)
+          ?.seq ?? Number.NaN
+      const seqOf = (text: string): number =>
+        window.find((m) => m.blocks.find((b) => b.type === 'text')?.text === text)?.seq ??
+        Number.NaN
+      expect(seqOf('A 60')).toBeLessThan(separatorSeq('s-new'))
+      expect(separatorSeq('s-new')).toBeLessThan(seqOf('B 1'))
+      expect(seqOf('B 60')).toBeLessThan(separatorSeq('s-3'))
+      expect(separatorSeq('s-3')).toBeLessThan(seqOf('C 1'))
+    })
+
+    const band = (idPrefix: string, label: string, count: number): Row[] =>
+      Array.from({ length: count }, (_, i) => ({
+        id: `${idPrefix}${i + 1}`,
+        role: i % 2 === 0 ? 'user' : 'agent',
+        text: `${label} ${i + 1}`,
+        seq: i + 1
+      }))
+
+    async function reopenChainAndScrollBack(
+      aRows: Row[],
+      cRows: Row[],
+      bRows: Row[] = band('b', 'B', 60)
+    ): Promise<void> {
+      seedHistory('s-a', 'agent-a', 'cfg-a', aRows, [marker(61, 'cfg-b', 's-b')])
+      seedHistory('s-b', 'agent-b', 'cfg-b', bRows, [marker(61, 'cfg-c', 's-c')])
+      seedHistory('s-c', 'agent-c', 'cfg-c', cRows)
+      useAcpStore.setState({
+        agentConfigs: [
+          { id: 'cfg-b', name: 'Bee', command: 'bee', args: [], env: {} },
+          { id: 'cfg-c', name: 'Cee', command: 'cee', args: [], env: {} }
+        ]
+      })
+      connectForReopen('agent-c')
+      await useAcpStore.getState().openHistorySession('s-a')
+      await flushTurnEnd()
+      expect(liveSwitchSources.size).toBe(0)
+      expect(texts('s-c')[0]).toBe(cRows[0].text)
+      for (let page = 0; page < 10; page++) {
+        await useAcpStore.getState().loadOlderMessages('s-c', 50)
+      }
+    }
+
+    it('SCROLL_BACK_REOPENED_CHAIN: a reopened A→B→C chain pages both earlier agents back without live switch links', async () => {
+      await reopenChainAndScrollBack(band('a', 'A', 60), band('c', 'C', MAX_LIVE_WINDOW_MESSAGES))
+
+      const label = (name: string, count: number): string[] =>
+        Array.from({ length: count }, (_, i) => `${name} ${i + 1}`)
+      expect(texts('s-c')).toEqual([
+        ...label('A', 60),
+        ...label('B', 60),
+        ...label('C', MAX_LIVE_WINDOW_MESSAGES)
+      ])
+      const window = useAcpStore.getState().messages['s-c'] ?? []
+      expect(window.slice(0, 2).map((m) => m.id)).toEqual([
+        'switch-splice:s-a:a1',
+        'switch-splice:s-a:a2'
+      ])
+      const seqs = window.map((m) => m.seq ?? Number.NaN)
+      expect(seqs.every((seq, i) => i === 0 || seq > seqs[i - 1])).toBe(true)
+    })
+
+    it('SCROLL_BACK_REPEATED_PROMPT: a prompt of an earlier agent equal to one in the window still pages back', async () => {
+      const aRows = band('a', 'A', 60).map((r) => (r.id === 'a1' ? { ...r, text: 'continue' } : r))
+      const cRows = band('c', 'C', MAX_LIVE_WINDOW_MESSAGES).map((r) =>
+        r.id === 'c299' ? { ...r, text: 'continue' } : r
+      )
+
+      await reopenChainAndScrollBack(aRows, cRows)
+
+      expect(texts('s-c')).toHaveLength(60 + 60 + MAX_LIVE_WINDOW_MESSAGES)
+      expect(texts('s-c').slice(0, 2)).toEqual(['continue', 'A 2'])
+    })
+
+    it('SCROLL_BACK_REPEATED_IN_BAND: a band row equal to a later row of the same band still pages back', async () => {
+      const bRows = band('b', 'B', 60).map((r) =>
+        r.id === 'b3' || r.id === 'b29' ? { ...r, text: 'continue' } : r
+      )
+
+      await reopenChainAndScrollBack(
+        band('a', 'A', 60),
+        band('c', 'C', MAX_LIVE_WINDOW_MESSAGES),
+        bRows
+      )
+
+      expect(texts('s-c')).toHaveLength(60 + 60 + MAX_LIVE_WINDOW_MESSAGES)
+      expect(texts('s-c').slice(60, 64)).toEqual(['B 1', 'B 2', 'continue', 'B 4'])
+    })
+
+    it('SCROLL_BACK_LIVE_BAND_HEAD: a live-spliced head on a counter seq pages back above its band separator', async () => {
+      seedHistory('s-new', 'agent-new', 'cfg-new', [
+        { id: 'user:seq-10', role: 'user', text: 'B early 1', seq: 10 },
+        { id: 'snapshot:agent:50', role: 'agent', text: 'B early 2', seq: 50 },
+        { id: 'user:seq-100', role: 'user', text: 'B late', seq: 100 }
+      ])
+      seedHistory('s-3', 'agent-3', 'cfg-3', [{ id: 'c1', role: 'user', text: 'C 1', seq: 1 }])
+      const separator = (id: string, seq: number, newSessionId: string): AgentSwitchRecord => ({
+        ...marker(seq, 'cfg-x', newSessionId),
+        id,
+        seq
+      })
+      useAcpStore.setState((s) => ({
+        messages: {
+          ...s.messages,
+          's-3': [
+            {
+              id: 'switch-splice:s-new:turn:b-late',
+              role: 'user',
+              blocks: [{ type: 'text', text: 'B late' }],
+              streaming: false,
+              timestamp: 0,
+              seq: -10,
+              hostSeq: 100
+            },
+            ...rows([{ id: 'c1', role: 'user', text: 'C 1', seq: 1 }])
+          ]
+        },
+        agentSwitches: {
+          ...s.agentSwitches,
+          's-3': [
+            separator('switch-splice:s-new:switch-splice:s-old:switch:fabricated:9', -50, 's-new'),
+            separator('switch-splice:s-new:switch:fabricated:20', -1, 's-3')
+          ]
+        }
+      }))
+
+      await useAcpStore.getState().loadOlderMessages('s-3', 50)
+
+      const state = useAcpStore.getState()
+      const timeline = [
+        ...(state.messages['s-3'] ?? []).map((m) => ({
+          seq: m.seq ?? Number.NaN,
+          label: m.blocks.find((b) => b.type === 'text')?.text
+        })),
+        ...(state.agentSwitches['s-3'] ?? []).map((sw) => ({
+          seq: sw.seq,
+          label: `-> ${sw.newSessionId}`
+        }))
+      ].sort((x, y) => x.seq - y.seq)
+      expect(timeline.map((entry) => entry.label)).toEqual([
+        '-> s-new',
+        'B early 1',
+        'B early 2',
+        'B late',
+        '-> s-3',
+        'C 1'
       ])
     })
 
@@ -4405,5 +4628,37 @@ describe('composer option fidelity', () => {
       resolveNewSession({ sessionId: 's-new' })
       await switchPromise
     })
+  })
+})
+
+describe('spliceSwitchTranscript', () => {
+  const message = (id: string, seq: number): ChatMessage => ({
+    id,
+    role: 'agent',
+    blocks: [{ type: 'text', text: id }],
+    streaming: false,
+    timestamp: seq,
+    seq
+  })
+
+  it('places a source with more than 1000 seqs wholly before the target', () => {
+    const source = Array.from({ length: 1500 }, (_, i) => message(`a${i + 1}`, i + 1))
+    const target = [message('b1', 1), message('b2', 2)]
+
+    const merged = spliceSwitchTranscript(
+      's-a',
+      { messages: source, toolCalls: [], switches: [] },
+      target,
+      [],
+      []
+    )
+
+    const timeline = [...merged.messages].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))
+    expect(timeline.slice(-4).map((m) => m.id)).toEqual([
+      'switch-splice:s-a:a1499',
+      'switch-splice:s-a:a1500',
+      'b1',
+      'b2'
+    ])
   })
 })

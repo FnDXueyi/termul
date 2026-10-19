@@ -17,6 +17,7 @@ const { getLog, addDiffTab, acpState, gitState } = vi.hoisted(() => ({
         { path: 'src/two.ts', staged: false, status: 'added' }
       ]
     } as Record<string, unknown[]>,
+    errors: {} as Record<string, { status?: string }>,
     diffs: {},
     selectedFile: null as string | null,
     setSelectedFile: vi.fn(),
@@ -205,5 +206,37 @@ describe('ChangesPanel', () => {
     // The rest of the visibility fetches still run.
     expect(gitState.fetchCommitContext).toHaveBeenCalledWith('/work')
     expect(gitState.fetchBranches).toHaveBeenCalledWith('/work')
+  })
+
+  it('shows why git status failed instead of an empty Change list', () => {
+    gitState.statuses['/wsl'] = []
+    gitState.errors['/wsl'] = {
+      status: "fatal: detected dubious ownership in repository at '/repo'"
+    }
+    render(<ChangesPanel cwd="/wsl" isVisible />)
+
+    expect(screen.getByRole('alert').textContent).toBe(
+      "Couldn't read changes: fatal: detected dubious ownership in repository at '/repo'"
+    )
+    expect(screen.queryByText('No changes detected')).toBeNull()
+  })
+
+  it('says a folder outside git is not a repository, without an error alert', () => {
+    gitState.statuses['/plain'] = []
+    gitState.errors['/plain'] = {
+      status: 'fatal: not a git repository (or any of the parent directories): .git\n'
+    }
+    render(<ChangesPanel cwd="/plain" isVisible />)
+
+    expect(screen.getByText('This folder is not a git repository.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows the empty state when git status succeeded with no changes', () => {
+    gitState.statuses['/clean'] = []
+    render(<ChangesPanel cwd="/clean" isVisible />)
+
+    expect(screen.getByText('No changes detected')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

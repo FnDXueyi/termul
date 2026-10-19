@@ -58,6 +58,7 @@ The workflow order is:
 6. In one publish job, download every workflow artifact, reject conflicting asset names, deeply validate each updater `{url, signature}` record, reject conflicting duplicate platform records, require every supported updater key (desktop and both server keys), and authoritatively create `latest.json`.
 7. Upload all release assets and `latest.json` once, then publish the draft.
 8. Invoke the reusable Homebrew workflow for every release channel. It always generates `SHA256SUMS.txt`; only stable releases update the tap.
+9. Build the `linux/amd64` and `linux/arm64` container image from the published server assets and push it to `ghcr.io/gnoviawan/termul-server` with BuildKit provenance and an SBOM. Every release gets a version tag. Only a stable release moves `latest`. The nightly workflow pushes the `nightly` tag the same way, and the Insider-to-Stable `promote` dispatch retags `latest` from the stable version tag without a rebuild. See [Run in Docker](#run-in-docker).
 
 No matrix/platform build job or standalone-server job is permitted to upload GitHub Release assets or write a shared `latest.json`.
 
@@ -205,6 +206,84 @@ Comma-separate several origins, or repeat `--allowed-origins`. The flag replaces
 
 The desktop app talks to the host through Tauri IPC, not these HTTP or WebSocket routes. The desktop shared-live server uses the same host check. Browser clients of that server are served by it, so they match the request host; a proxy in front of it that keeps the public `Host` header does too.
 
+## Run in Docker
+
+`Dockerfile` and `docker-compose.yml` at the repository root run `termul-server` in a container as the non-root user `termul`. The image holds the published release binary for `linux/amd64` or `linux/arm64`, plus `bash`, `git`, `ssh`, and `curl`. The build checks the binary's minisign signature against the updater public key in `src-tauri/tauri.conf.json`. Release tags publish the image to `ghcr.io/gnoviawan/termul-server`, and the nightly workflow publishes the `nightly` tag.
+
+### Start the server
+
+1. In the directory that holds `docker-compose.yml`, create the workspace directory: `mkdir -p workspace`.
+2. Start the container: `docker compose up -d`. Compose pulls `ghcr.io/gnoviawan/termul-server:latest`. If it cannot pull the image, it builds one from the newest stable release.
+3. Read the auth token:
+
+	```bash
+	docker compose exec termul-server cat /home/termul/.local/state/termul/web-auth-token
+	```
+
+4. Open `http://localhost:8080/#token=<token>`.
+5. In the web UI, add `/workspace` or a folder under it as a project.
+
+Inside the container the server binds `0.0.0.0`, so it always requires the token. On first start it generates the token, stores it in the `termul-home` volume, and never prints it. To set your own token, put `TERMUL_WEB_AUTH_TOKEN=<token>` in a `.env` file next to `docker-compose.yml`. The token then shows in `docker inspect` output.
+
+Compose publishes the port on `127.0.0.1` only. Changing the mapping to `8080:8080` exposes the server on every host network, over plain HTTP. For remote access, put an HTTPS reverse proxy in front instead.
+
+The token is a full credential. A holder of the token gets a shell and can start agents as the `termul` user, with every SSH key and agent login in `/home/termul` within reach. The holder can also register any path the container can see as a project. Treat the token like an SSH private key. Never expose the port beyond localhost without TLS and a reverse proxy you trust.
+
+### Know what the container can see
+
+| Path in the container | Source | Contents |
+| --- | --- | --- |
+| `/home/termul` | `termul-home` named volume | The state directory `.local/state/termul` (sessions, `projects.json`, `store.json`, `web-auth-token`), plus the home directory of the shells and agents the server starts: git config, SSH keys, agent logins. |
+| `/workspace` | `./workspace` bind mount, or `TERMUL_WORKSPACE` | Your projects. This is the only host directory the server can see. |
+| `/tmp` | tmpfs, mounted `exec` | Scratch files and helper binaries. Cleared when the container stops. |
+
+The root filesystem is read-only, the container drops every Linux capability, and `no-new-privileges` is set. If a tool you run in Termul must write somewhere else, remove `read_only: true` from `docker-compose.yml`.
+
+Compose sets `TERMUL_SERVER_ALLOW_REMOTE_WRITES=true`. Browser requests reach the container from the Docker network, never from loopback. Without the setting, the server refuses project registration and every file and git write. With it, writes stay confined to registered projects, and the token is still required.
+
+### Match the workspace owner
+
+The `termul` user has UID 1000 and GID 1000. It must be able to write to the workspace. If your host user has other IDs, build the image with them before the first start:
+
+```bash
+TERMUL_UID=$(id -u) TERMUL_GID=$(id -g) docker compose up -d --build
+```
+
+The files in `termul-home` belong to the UID that created them. If you change the UID after the first start, run `chown -R` on the volume's files, or delete the volume with `docker compose down --volumes`. Deleting the volume also deletes the token, sessions, and project registry.
+
+### Add agent CLIs
+
+The image contains no agent CLIs such as Claude Code or Codex. `PATH` starts with `/home/termul/.local/bin`, so a tool installed there persists in the `termul-home` volume. For tools that need system packages, build a derived image: start `FROM ghcr.io/gnoviawan/termul-server`, install as `root`, and end with `USER termul`.
+
+### Put a reverse proxy in front
+
+Run the proxy on the host and forward to `127.0.0.1:8080`, with WebSocket upgrades enabled. A proxy that keeps the public `Host` header needs no extra setting. Caddy does this by default:
+
+```
+termul.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+If the proxy rewrites `Host` to the upstream address, add the public origin to `.env`:
+
+```bash
+TERMUL_ALLOWED_ORIGINS=https://termul.example.com
+```
+
+A proxy container on the same Compose network reaches the server at `termul-server:8080`. In that case, remove the `ports` entry.
+
+### Update the image
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+State stays in the `termul-home` volume. The image sets `TERMUL_SERVER_UPDATE_ENABLED=false`, and the server cannot replace its root-owned binary, so a new image is the only update path. To pin a version, set `TERMUL_IMAGE=ghcr.io/gnoviawan/termul-server:<version>` in `.env`. Use `:nightly` to follow the nightly channel.
+
+To build the image yourself, set `TERMUL_RELEASE` to a release tag such as `v0.5.0` or `nightly`, then run `docker compose up -d --build`. The default, `latest`, is the newest stable release. An `arm64` build needs a release that publishes `termul-server-linux-aarch64`. v0.4.21 does not.
+
 ## Operational Risks and Release Checklist
 
 - Version mismatches across JS, Rust, and Tauri configuration fail the release.
@@ -221,6 +300,7 @@ Recommended release checks:
 5. Confirm both macOS portability/signing/notarization gates pass and that both `standalone-server` matrix entries (x64 and arm64) succeed.
 6. Confirm the centralized publish job reports every required updater platform and uploads installers, updater archives, `.sig` files, `termul-server`, `termul-server-linux-aarch64`, and `latest.json` exactly once.
 7. Confirm `SHA256SUMS.txt` exists; for stable releases, confirm the Homebrew cask update succeeds.
+8. Confirm the `Publish container image` job pushed `ghcr.io/gnoviawan/termul-server:<version>`, and `latest` for a stable release. Nightly runs push `:nightly`, and a `promote` dispatch retags `:latest` from the stable version tag. After the first publish, confirm that the package page on GitHub shows the package as public.
 
 ## Local Validation
 
@@ -242,6 +322,9 @@ Normal pre-PR validation remains `bun run ci`, `bun run typecheck`, `bun run tes
 - `.github/workflows/release.yml`
 - `.github/workflows/publish-homebrew.yml`
 - `.github/workflows/publish-aur.yml`
+- `.github/workflows/docker.yml`
+- `Dockerfile`
+- `docker-compose.yml`
 - `scripts/release/prepare-platform-artifacts.mjs`
 - `scripts/release/merge-updater-manifests.mjs`
 - `scripts/release/homebrew.sh`

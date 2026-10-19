@@ -70,7 +70,7 @@ async fn a_live_detached_pty_is_never_swept_however_old() {
     assert!(manager.get(&spawned.info.id).is_some());
     assert!(!instance.has_exited());
     assert_eq!(manager.live_terminal_count(), 1);
-    assert_eq!(manager.list_preserved("a").len(), 1);
+    assert_eq!(manager.list_preserved("a", None).len(), 1);
 
     manager.force_kill(&spawned.info.id).await.unwrap();
 }
@@ -132,7 +132,7 @@ async fn an_exited_pty_keeps_its_output_until_the_ttl_then_expires() {
         String::from_utf8_lossy(&output).contains("lifetime-marker"),
         "an exited PTY still replays its output within the TTL"
     );
-    assert_eq!(manager.list_preserved("a").len(), 1);
+    assert_eq!(manager.list_preserved("a", None).len(), 1);
     assert_eq!(manager.live_terminal_count(), 0);
 
     // Past the TTL it is removed and every per-terminal record goes with it.

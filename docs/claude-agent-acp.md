@@ -97,6 +97,13 @@ or refreshes the login tokens; Claude Code keeps them in its own credential
 store. The Account list (`<state dir>/claude-accounts.json`) holds names and
 ids only.
 
+When a Project's Account changes, each open Claude chat restarts on the new
+Account and resumes the same session. If the new Account cannot find the
+session (the agent answers `session/resume` with `Resource not found`), the
+chat continues in a new session. That session starts from a summary of the
+conversation, the same handoff as an agent switch, and the earlier messages
+stay above a handoff divider.
+
 Headless hosts manage Accounts with:
 
 ```sh

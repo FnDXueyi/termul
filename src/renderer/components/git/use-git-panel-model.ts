@@ -27,6 +27,7 @@ export function useGitPanelModel({ cwd, isVisible }: UseGitPanelModelOptions) {
 
   // The store keys every working copy by its canonical path.
   const key = normalizePath(cwd)
+  const statusError = useGitStatusStore((state) => state.errors[key]?.status)
   const stashes = stashesState[key] ?? []
   const branches = branchesState[key] ?? []
 
@@ -66,6 +67,7 @@ export function useGitPanelModel({ cwd, isVisible }: UseGitPanelModelOptions) {
     searchQuery,
     setSearchQuery,
     stagedFiles,
-    unstagedFiles
+    unstagedFiles,
+    statusError
   }
 }

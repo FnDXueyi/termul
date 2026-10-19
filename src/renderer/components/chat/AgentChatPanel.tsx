@@ -54,11 +54,13 @@ import { CHAT_GUTTER_X } from './chat-layout'
 import { ChatStarters } from './chat-start'
 import { buildTimeline, consolidateThoughtGroups } from './chat-timeline'
 import { ClaudeLimitNotice } from './claude-account/ClaudeLimitNotice'
+import { ClaudeSignInAction } from './claude-account/ClaudeSignInAction'
 import { ElicitationPrompt } from './ElicitationPrompt'
 import { PendingRestartBanner } from './PendingRestartBanner'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PlanPanel } from './PlanPanel'
 import { PromptReconcileNotice } from './PromptReconcileNotice'
+import { SubagentPill } from './SubagentPill'
 import { useApprovalDock } from './use-approval-dock'
 import { AUTO_RESUME_FAILED_REASON, useIdleStopAutoResume } from './use-idle-stop-auto-resume'
 
@@ -861,6 +863,7 @@ export function AgentChatPanel({
         (hasHistoryEntry || codexSignedOut) && (
           <div className="flex items-center justify-between gap-2 border-b border-warning/30 bg-warning/10 px-3 py-1.5 text-xs text-warning">
             <span>{codexSignedOut ? CODEX_CLI_SIGNED_OUT_MESSAGE : 'This chat stopped.'}</span>
+            {!codexSignedOut && <ClaudeSignInAction sessionId={sessionId} />}
             <button
               type="button"
               onClick={() => {
@@ -910,14 +913,28 @@ export function AgentChatPanel({
         defaultCollapsed={isMobileShell}
         forceCollapsed={compactDock}
       />
-      <ChatMessageList
-        items={timeline}
-        sessionId={session.id}
-        showRunningIndicator={showRunningIndicator}
-        filePathContext={filePathContext}
-        onEditMessage={seedComposer}
-        onRetry={canOfferRetry ? handleRetry : undefined}
-      />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <ChatMessageList
+          items={timeline}
+          sessionId={session.id}
+          showRunningIndicator={showRunningIndicator}
+          filePathContext={filePathContext}
+          onEditMessage={seedComposer}
+          onRetry={canOfferRetry ? handleRetry : undefined}
+        />
+        {/* Top-right status slot: floats over the transcript (clear of the
+            scrollbar gutter) so status items take no layout height. */}
+        <div className="pointer-events-none absolute right-4 top-3.5 z-20 flex items-center gap-1.5">
+          <SubagentPill
+            toolCalls={toolCalls}
+            messages={messages}
+            turnActive={session.activeTurn}
+            filePathContext={filePathContext}
+            hidden={(isMobileShell && osk.isOskOpen) || showTransportOverlay}
+            isVisible={isVisible}
+          />
+        </div>
+      </div>
       {showPromptReconcile && promptCommand && session.activeTurn && (
         // AD-6: the host has not yet confirmed the last prompt (the connection
         // dropped before the reply). Not an error — the same turn id is resent, and

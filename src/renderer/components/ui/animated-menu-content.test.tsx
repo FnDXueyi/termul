@@ -28,11 +28,12 @@ afterEach(() => {
 })
 
 describe('menuMotion (transitions.dev menu dropdown, on the motion tokens)', () => {
-  it('opens 250ms from scale 0.97 and closes 150ms to scale 0.99 on the smooth-out curve', () => {
+  it('opens 250ms from scale 0.97 and closes 150ms as a fade, both on the smooth-out curve', () => {
     const m = menuMotion(false)
     expect(m.initial).toEqual({ opacity: 0, scale: 0.97 })
     expect(m.open).toEqual({ opacity: 1, scale: 1 })
-    expect(m.closed).toEqual({ opacity: 0, scale: 0.99 })
+    // No scale-down on close: the menu only fades out.
+    expect(m.closed).toEqual({ opacity: 0, scale: 1 })
     expect(m.openTransition).toEqual({ duration: 0.25, ease: [0.22, 1, 0.36, 1] })
     expect(m.closeTransition).toEqual({ duration: 0.15, ease: [0.22, 1, 0.36, 1] })
   })

@@ -1156,6 +1156,146 @@ describe('acp-store live window + lazy-load + coalescing', () => {
     ])
   })
 
+  it('(c6) a row whose text repeats a later row of the window still pages back', async () => {
+    const sid = 's-twin-own-repeat'
+    seedSession(sid, 'agent-1', false)
+    const fullMessages = buildMessages(400).map((m) =>
+      m.id === 'm1' || m.id === 'm301'
+        ? { ...m, role: 'user' as const, blocks: [{ type: 'text', text: 'continue' }] }
+        : m
+    )
+    setCachedSessionPayload(sid, { metadata: fakeMetadata(sid, 400), messages: fullMessages })
+    useAcpStore.setState({ messages: { [sid]: fullMessages.slice(100) } })
+
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+
+    const ids = useAcpStore.getState().messages[sid].map((m) => m.id)
+    expect(ids).toHaveLength(400)
+    expect(ids.slice(0, 3)).toEqual(['m0', 'm1', 'm2'])
+  })
+
+  it('(c7) an optimistic prompt does not swallow an equal older prompt of an id-anchored window', async () => {
+    const sid = 's-twin-optimistic-repeat'
+    seedSession(sid, 'agent-1', false)
+    const fullMessages = buildMessages(10).map((m) =>
+      m.id === 'm2' ? { ...m, blocks: [{ type: 'text', text: 'continue' }] } : m
+    )
+    setCachedSessionPayload(sid, { metadata: fakeMetadata(sid, 10), messages: fullMessages })
+    useAcpStore.setState({
+      messages: {
+        [sid]: [
+          ...fullMessages.slice(5),
+          {
+            id: 'turn:live-1',
+            role: 'user',
+            blocks: [{ type: 'text', text: 'continue' }],
+            streaming: false,
+            timestamp: 0,
+            seq: 900
+          }
+        ]
+      }
+    })
+
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+
+    expect(useAcpStore.getState().messages[sid].map((m) => m.id)).toEqual([
+      'm0',
+      'm1',
+      'm2',
+      'm3',
+      'm4',
+      'm5',
+      'm6',
+      'm7',
+      'm8',
+      'm9',
+      'turn:live-1'
+    ])
+  })
+
+  it('(c8) a seq-anchored page folds host-stamped bubbles by host seq, never by equal text', async () => {
+    const sid = 's-twin-host-seq'
+    seedSession(sid, 'agent-1', false)
+    const row = (id: string, role: 'user' | 'agent', text: string, seq: number): ChatMessage => ({
+      id,
+      role,
+      blocks: [{ type: 'text', text }],
+      streaming: false,
+      timestamp: seq,
+      seq
+    })
+    const persisted: ChatMessage[] = [
+      row('m0', 'user', 'msg 0', 0),
+      row('snapshot:agent:6', 'agent', 'done', 6),
+      row('user:seq-10', 'user', 'current prompt', 10),
+      row('snapshot:agent:11', 'agent', 'working', 11),
+      row('snapshot:agent:12', 'agent', 'tail', 12)
+    ]
+    setCachedSessionPayload(sid, { metadata: fakeMetadata(sid, 5), messages: persisted })
+    useAcpStore.setState({
+      messages: {
+        [sid]: [
+          row('turn:live-1', 'user', 'current prompt', 900),
+          { ...row('msg-live-1', 'agent', 'working', 901), hostSeq: 11 },
+          { ...row('msg-live-2', 'agent', 'done', 902), hostSeq: 13 }
+        ]
+      }
+    })
+
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+
+    expect(useAcpStore.getState().messages[sid].map((m) => m.id)).toEqual([
+      'm0',
+      'snapshot:agent:6',
+      'turn:live-1',
+      'msg-live-1',
+      'msg-live-2'
+    ])
+  })
+
+  it('(c9) a host-stamped head anchors exactly: an equal older prompt is not folded into a later optimistic one', async () => {
+    const sid = 's-twin-host-head'
+    seedSession(sid, 'agent-1', false)
+    const row = (id: string, role: 'user' | 'agent', text: string, seq: number): ChatMessage => ({
+      id,
+      role,
+      blocks: [{ type: 'text', text }],
+      streaming: false,
+      timestamp: seq,
+      seq
+    })
+    const persisted: ChatMessage[] = [
+      row('m0', 'user', 'msg 0', 1),
+      row('turn:t3', 'user', 'continue', 5),
+      row('snapshot:agent:6', 'agent', 'first answer', 6),
+      row('snapshot:agent:15', 'agent', 'second answer', 15)
+    ]
+    setCachedSessionPayload(sid, {
+      metadata: { ...fakeMetadata(sid, 4), lastSeq: 20 },
+      messages: persisted
+    })
+    useAcpStore.setState({
+      messages: {
+        [sid]: [
+          { ...row('msg-h', 'agent', 'second answer', 950), hostSeq: 15 },
+          row('turn:t9', 'user', 'continue', 960)
+        ]
+      }
+    })
+
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+
+    expect(useAcpStore.getState().messages[sid].map((m) => m.id)).toEqual([
+      'm0',
+      'turn:t3',
+      'snapshot:agent:6',
+      'msg-h',
+      'turn:t9'
+    ])
+  })
+
   it('(d) coalescing collapses a burst of chunks into a single set() per frame', () => {
     const sid = 's-coalesce'
     seedSession(sid, 'agent-1', true)

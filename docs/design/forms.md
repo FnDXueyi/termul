@@ -11,7 +11,9 @@ Use primitives in `src/renderer/components/ui`. Wire `Label htmlFor` to the cont
 
 `Checkbox`, `RadioGroup`, and `Form` exist under `ui/` and have **no** product call sites. Do not start a second boolean pattern — use `Switch`. Do not start a radio pattern — use `Select`. One exception: a pick-one list whose options carry live data to compare (Project Settings → Provider, where each account shows its usage) is a `role="listbox"` of `role="option"` rows with a `Check` on the chosen row, like menu rows, with arrow-key focus and Enter/Space to choose. Do not add `react-hook-form` `Form` unless the task is to adopt that primitive across settings.
 
-AppPreferences still has native `<select>` and custom toggle knobs. That is legacy. New settings use `Select` and `Switch` (`ContextBarSettingsPopover`, `CustomAgentDialog`).
+Preferences and Project settings are one page per category (`SettingsLayout`). A setting is a `SettingsRow` (label and description left, control right) inside a `SettingsGroup` + `SettingsCard`. Lists use `SettingsSelect` (a sized `Select`), booleans use `Switch`, numbers with limits use `SettingsStepper`, status uses `StatusWord` (a dot and a word, never the dot alone). Give the control an `id`, pass it as the row's `htmlFor`, and point `aria-describedby` at `settingsDescriptionId(id)`.
+
+Text fields and select triggers draw their edge with `border-field-border` (3:1 against card, background and popover). `border` and `input` stay for dividers and the Switch track.
 
 AppPreferences persists on each control change — do not add a footer Save. ProjectSettings uses the `SettingsModal` footer Save (`variant` default). One filled `Button` in that footer.
 

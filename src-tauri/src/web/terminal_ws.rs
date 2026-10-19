@@ -711,10 +711,12 @@ async fn handle(
                 // client querying an unknown project gets the same empty reply
                 // shape as a project with nothing preserved.
                 let project_id = string_field(&request.payload, "projectId")?;
-                let preserved = state.pty.list_preserved(project_id);
+                let terminal_id = string_field(&request.payload, "terminalId").ok();
+                let preserved = state.pty.list_preserved(project_id, terminal_id);
                 info!(
-                    "[terminal-ws] list_preserved project_id={} count={}",
+                    "[terminal-ws] list_preserved project_id={} terminal_id={:?} count={}",
                     project_id,
+                    terminal_id,
                     preserved.len()
                 );
                 Ok(json!({ "projectId": project_id, "terminals": preserved }))

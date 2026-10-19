@@ -307,9 +307,13 @@ export function createTauriTerminalApi(): TerminalApi {
     return result
   }
 
-  async function listPreserved(projectId: string): Promise<IpcResult<PreservedTerminalEntry[]>> {
+  async function listPreserved(
+    projectId: string,
+    terminalId?: string
+  ): Promise<IpcResult<PreservedTerminalEntry[]>> {
     const result = await invokeIpc<PreservedTerminalEntry[]>(IPC_COMMANDS.LIST_PRESERVED, {
-      projectId
+      projectId,
+      terminalId
     })
     if (!result.success) {
       void logFrontendError({

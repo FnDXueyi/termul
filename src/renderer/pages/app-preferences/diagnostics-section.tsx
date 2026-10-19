@@ -1,120 +1,115 @@
 import { Bug, Clipboard, Download, FileText, FolderOpen } from '@/components/icons'
+import { SettingsCard, SettingsGroup } from '@/components/settings/SettingsGroup'
 import { SettingsSection } from '@/components/settings/SettingsLayout'
+import { SettingsNotice } from '@/components/settings/SettingsNotice'
+import { SettingsRow } from '@/components/settings/SettingsRow'
+import { Button } from '@/components/ui/button'
 import { logApi } from '@/lib/api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { useReportBugStore } from '@/stores/report-bug-store'
+import { rowId } from './categories'
+import { APP_VERSION } from './updates-section'
+
+function ActionRow({
+  label,
+  description,
+  action,
+  actionLabel,
+  icon,
+  onClick
+}: {
+  label: string
+  description: string
+  action: string
+  actionLabel: string
+  icon: React.ReactNode
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <SettingsRow label={label} description={description} layout="inline">
+      <Button type="button" size="xs" variant="outline" onClick={onClick} aria-label={actionLabel}>
+        {icon}
+        {action}
+      </Button>
+    </SettingsRow>
+  )
+}
 
 export function DiagnosticsSection(): React.JSX.Element {
-  // Desktop-only actions (issue #843): Reveal Log Folder / Export Log File /
-  // Export to Default Directory are hidden on web (host filesystem and
-  // native dialogs are unreachable from the browser) instead of rendered as
-  // disabled buttons. Copy Log Contents stays — it works over the web
-  // transport (`logApi.copyLogContents` POSTs to the server and copies the
-  // returned contents).
+  // Desktop-only actions (issue #843): the log folder and file exports are
+  // hidden on web (host filesystem and native dialogs are unreachable from the
+  // browser). Copy works over the web transport, so it stays.
   const isDesktop = isTauriContext()
 
   return (
     <SettingsSection id="diagnostics">
-      <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-        <div className="w-full pt-1 md:w-1/3">
-          <div className="flex items-center gap-2">
-            <FileText size={18} className="text-primary" />
-            <h2 className="text-lg font-medium text-foreground">Diagnostics & Logs</h2>
-          </div>
-          <p className="text-sm text-muted-foreground mt-1">
-            {isDesktop
-              ? 'Export or copy application logs to troubleshoot issues.'
-              : 'Copy application logs to troubleshoot issues.'}
-          </p>
-        </div>
-        <div className="w-full space-y-4 md:w-full md:w-2/3">
-          <div className="grid grid-cols-2 gap-3">
-            {isDesktop && (
-              <button
-                type="button"
-                onClick={() => void logApi.revealLogDir()}
-                className="flex items-center justify-start gap-2.5 px-4 py-3 bg-secondary/30 hover:bg-secondary/60 border border-border rounded-lg text-sm font-medium text-foreground transition-all hover:scale-[1.01] active:scale-[0.99] shadow-sm"
-              >
-                <FolderOpen size={16} className="text-muted-foreground" />
-                <div className="text-left">
-                  <div>Reveal Log Folder</div>
-                  <div className="text-3xs text-muted-foreground font-normal">
-                    Open in file explorer
-                  </div>
-                </div>
-              </button>
-            )}
-
-            {isDesktop && (
-              <button
-                type="button"
+      <SettingsGroup title="Application log">
+        <SettingsCard>
+          <ActionRow
+            label="Copy log"
+            description="Copy the log text to the clipboard."
+            action="Copy"
+            actionLabel="Copy log contents"
+            icon={<Clipboard size={13} />}
+            onClick={() => void logApi.copyLogContents()}
+          />
+          {isDesktop && (
+            <>
+              <ActionRow
+                label="Export log file"
+                description="Save a copy of the log where you choose."
+                action="Export…"
+                actionLabel="Export log file…"
+                icon={<FileText size={13} />}
                 onClick={() => void logApi.exportLogFile()}
-                className="flex items-center justify-start gap-2.5 px-4 py-3 bg-secondary/30 hover:bg-secondary/60 border border-border rounded-lg text-sm font-medium text-foreground transition-all hover:scale-[1.01] active:scale-[0.99] shadow-sm"
-              >
-                <FileText size={16} className="text-muted-foreground" />
-                <div className="text-left">
-                  <div>Export Log File...</div>
-                  <div className="text-3xs text-muted-foreground font-normal">
-                    Save to a custom location
-                  </div>
-                </div>
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => void logApi.copyLogContents()}
-              className="flex items-center justify-start gap-2.5 px-4 py-3 bg-secondary/30 hover:bg-secondary/60 border border-border rounded-lg text-sm font-medium text-foreground transition-all hover:scale-[1.01] active:scale-[0.99] shadow-sm"
-            >
-              <Clipboard size={16} className="text-muted-foreground" />
-              <div className="text-left">
-                <div>Copy Log Contents</div>
-                <div className="text-3xs text-muted-foreground font-normal">
-                  Copy logs to clipboard
-                </div>
-              </div>
-            </button>
-
-            {isDesktop && (
-              <button
-                type="button"
+              />
+              <ActionRow
+                label="Export to Downloads"
+                description="Save a copy of the log to your Downloads folder."
+                action="Export"
+                actionLabel="Export log to Downloads"
+                icon={<Download size={13} />}
                 onClick={() => void logApi.exportLogToDefault()}
-                className="flex items-center justify-start gap-2.5 px-4 py-3 bg-secondary/30 hover:bg-secondary/60 border border-border rounded-lg text-sm font-medium text-foreground transition-all hover:scale-[1.01] active:scale-[0.99] shadow-sm"
-              >
-                <Download size={16} className="text-muted-foreground" />
-                <div className="text-left">
-                  <div>Export to Default Directory</div>
-                  <div className="text-3xs text-muted-foreground font-normal">
-                    Save directly to Downloads
-                  </div>
-                </div>
-              </button>
-            )}
-
-            {/* Report a Bug (spec-bug-report-dialog): the same dialog every
-                other entry point opens — works on desktop and web. */}
-            <button
-              type="button"
-              onClick={() => useReportBugStore.getState().openReport()}
-              className="flex items-center justify-start gap-2.5 px-4 py-3 bg-secondary/30 hover:bg-secondary/60 border border-border rounded-lg text-sm font-medium text-foreground transition-all hover:scale-[1.01] active:scale-[0.99] shadow-sm"
-            >
-              <Bug size={16} className="text-muted-foreground" />
-              <div className="text-left">
-                <div>Report a Bug</div>
-                <div className="text-3xs text-muted-foreground font-normal">
-                  File an issue with diagnostics
-                </div>
-              </div>
-            </button>
-          </div>
-          {!isDesktop && (
-            <p className="text-xs text-muted-foreground">
-              Logs live on the server host. Desktop-only actions (reveal folder, file export) are
-              hidden on the web client — use Copy Log Contents and paste them where you need them.
-            </p>
+              />
+              <ActionRow
+                label="Log folder"
+                description="Open the folder that holds the Termul logs."
+                action="Show folder"
+                actionLabel="Show log folder"
+                icon={<FolderOpen size={13} />}
+                onClick={() => void logApi.revealLogDir()}
+              />
+            </>
           )}
-        </div>
-      </div>
+          {/* Report a Bug (spec-bug-report-dialog): the same dialog every
+              other entry point opens — works on desktop and web. */}
+          <ActionRow
+            label="Report a bug"
+            description="File an issue with a redacted diagnostics bundle."
+            action="Report"
+            actionLabel="Report a bug"
+            icon={<Bug size={13} />}
+            onClick={() => useReportBugStore.getState().openReport()}
+          />
+        </SettingsCard>
+        {!isDesktop && (
+          <SettingsNotice>
+            Logs live on the server host. Export and the log folder are available in the desktop
+            app.
+          </SettingsNotice>
+        )}
+      </SettingsGroup>
+      {!isDesktop && (
+        <SettingsGroup title="Server version">
+          <SettingsCard>
+            <SettingsRow
+              id={rowId('server-version')}
+              label={`termul-server ${APP_VERSION}`}
+              description="The web client is served by the termul-server and updates together with it. Reload the page after the server updates."
+            />
+          </SettingsCard>
+        </SettingsGroup>
+      )}
     </SettingsSection>
   )
 }

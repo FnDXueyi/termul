@@ -61,6 +61,7 @@ use crate::web::store::WebStore;
 
 mod access;
 mod agents;
+mod canvas;
 pub mod channel;
 mod chat_reads;
 mod claude_accounts;
@@ -80,6 +81,7 @@ mod watch;
 // for `tests.rs`' `use super::*` without widening visibility past `ws`.
 use access::*;
 use agents::*;
+use canvas::*;
 use chat_reads::*;
 use claude_accounts::*;
 use commands::*;
@@ -465,6 +467,10 @@ pub enum WsErrorCode {
     /// A request's `commandId` is malformed: not 1-128 characters of
     /// `[A-Za-z0-9_-]`.
     InvalidCommandId,
+    /// The Claude Account a request needs is not signed in: choosing it for
+    /// a Project or as the default, or starting a managed Claude agent on it.
+    /// The message names the Account and where to sign in.
+    ClaudeAccountSignedOut,
 }
 
 impl WsErrorCode {
@@ -498,6 +504,7 @@ impl WsErrorCode {
             Self::InvalidAgentConfig => "invalid_agent_config",
             Self::CommandConflict => "command_conflict",
             Self::InvalidCommandId => "invalid_command_id",
+            Self::ClaudeAccountSignedOut => "claude_account_signed_out",
         }
     }
 }
@@ -712,7 +719,8 @@ pub(super) fn elapsed_ms(epoch: tokio::time::Instant) -> u64 {
 /// `AuthRequired` (-32000) failures — tagged `"ACP_AUTH_REQUIRED: …"` at the
 /// manager boundary, or the bare default `"Authentication required"` message
 /// (exact match) for pre-collapsed paths — → `AgentAuthRequired` (Story 7);
-/// `"unknown agent: …"` / `"unknown permission request: …"` → `NotFound`;
+/// `"unknown agent: …"` / `"unknown permission request: …"` and agent-side
+/// `ResourceNotFound` (-32002, tagged `"ACP_RESOURCE_NOT_FOUND: …"`) → `NotFound`;
 /// capability-gate failures (`"agent does not support …"`) → `Unsupported`;
 /// `"ACP_PROVIDER_*: …"` provider failures → `provider_quota_exceeded` /
 /// `provider_session_limit` / `provider_request_rejected`.
@@ -743,11 +751,20 @@ pub(super) fn acp_err_to_reply(id: String, err: String) -> WsReply {
         };
         return WsReply::err(id, code, message.to_string());
     }
+    if let Some(message) = crate::acp::claude_accounts::strip_signed_out_tag(&err) {
+        return WsReply::err(id, WsErrorCode::ClaudeAccountSignedOut, message.to_string());
+    }
     // Issue #837 split-brain guard: the manager tags a rejected reopen with
     // `ACP_SESSION_OWNED_BY_OTHER` when the session belongs to a different
     // live agent mid-turn.
     if err.starts_with(crate::acp::manager::ACP_SESSION_OWNED_BY_OTHER) {
         return WsReply::err(id, WsErrorCode::SessionOwnedByOther, err);
+    }
+    if let Some(message) = err
+        .strip_prefix(crate::acp::manager::ACP_RESOURCE_NOT_FOUND_PREFIX)
+        .and_then(|rest| rest.strip_prefix(": "))
+    {
+        return WsReply::err(id, WsErrorCode::NotFound, message.to_string());
     }
     let code = if err
         .strip_prefix(crate::acp::manager::ACP_AUTH_REQUIRED_PREFIX)
@@ -778,6 +795,8 @@ pub(super) fn ok_with_payload<T: serde::Serialize>(id: String, value: &T) -> WsR
     }
 }
 
+#[cfg(test)]
+mod canvas_tests;
 #[cfg(test)]
 mod capability_tests;
 #[cfg(test)]

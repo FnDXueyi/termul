@@ -22,7 +22,6 @@ import {
   loadSessionPayloadTail,
   maxPayloadSeq,
   queueSessionPayloadDelete,
-  reloadSessionPayloadFromHost,
   restoredSwitches,
   restoredToolCalls,
   type SessionIndexEntry,
@@ -67,6 +66,8 @@ import {
   extractTermulPlanFenceJson,
   finalizeStreaming,
   isResumeFailureError,
+  lastErrorFromPersistedTurn,
+  lastOwnUserPromptBlocks,
   mergeSessionIndexEntries,
   normalizeUserMessages,
   openTurnPromptSeq,
@@ -125,6 +126,7 @@ import {
 } from '../types'
 import { authenticatedAgents, evictAgentForTransport, withAuthRetry } from './agent'
 import { flushNextQueuedPrompt, runPromptTurn } from './prompt'
+import { loadFreshSourcePayload } from './switch-seam'
 import {
   dropSessionBookkeeping,
   dropSessionTranscriptState,
@@ -428,24 +430,6 @@ export function _resetInFlightHistoryOpensForTesting(): void {
 export function _resetSessionIndexLoadGenerationForTesting(): void {
   sessionIndexLoadGeneration = 0
   sessionIndexAppliedGeneration = 0
-}
-
-/**
- * Source payloads for a switch re-splice or redirect walk must be current: the
- * desktop cache is never refreshed by live events, so a cached copy can predate
- * the switch marker and the source's latest turns. A failed or absent host re-read
- * (`null` in server and `live_only` modes) falls back to the normal load.
- */
-async function loadFreshSourcePayload(id: string): Promise<SessionPayload | null> {
-  const fresh = await reloadSessionPayloadFromHost(id).catch((error: unknown) => {
-    void logFrontendError({
-      level: 'warn',
-      source: 'acp.switchAgent.splice',
-      message: `Host re-read of switch source ${id} failed; using the cached copy if there is one: ${error instanceof Error ? error.message : String(error)}`
-    })
-    return null
-  })
-  return fresh ?? (await loadSessionPayload(id))
 }
 
 /**
@@ -812,6 +796,10 @@ async function openHistorySessionInner(
   // bubble marks a DEAD turn — no agent will ever send its `prompt_complete`,
   // so installing it as live would strand the spinner forever.
   const turnLive = persistedTurnIsLive(meta) || (meta.status === 'active' && openTurn !== null)
+  // The last turn's failure outlives a reload: the error banner explains why
+  // the chat ends on an unanswered prompt.
+  const restoredTurnError = lastErrorFromPersistedTurn(meta.lastTurnError)
+  const keepRestoredError = restoredTurnError.lastError !== null
   set((s) => ({
     sessions: {
       ...s.sessions,
@@ -830,7 +818,7 @@ async function openHistorySessionInner(
         modes: existingControls?.modes ?? null,
         models: existingControls?.models ?? null,
         configOptions: existingControls?.configOptions ?? [],
-        lastError: null,
+        ...restoredTurnError,
         createdAt: meta.createdAt,
         replaying: null,
         worktreePath: meta.worktreePath,
@@ -847,7 +835,14 @@ async function openHistorySessionInner(
     // borderless separators at their seq positions after a reopen.
     agentSwitches: { ...s.agentSwitches, [id]: installed.switches },
     ...(Array.isArray(payload.commands)
-      ? withCommands(s, id, payload.commands, payload.commandsSeq)
+      ? withCommands(
+          s,
+          id,
+          payload.commands,
+          payload.commandsSeq === undefined
+            ? undefined
+            : { logEpoch: payload.metadata.logEpoch ?? null, seq: payload.commandsSeq }
+        )
       : {})
   }))
   onTranscriptInstalled()
@@ -1033,7 +1028,8 @@ async function openHistorySessionInner(
       ensured = await ensureLiveAgent(get, set, meta.agentConfigId, meta.cwd, {
         silentSpawnFailure: true,
         surfaceDefiniteRejection: true,
-        projectId: meta.projectId ?? undefined
+        projectId: meta.projectId ?? undefined,
+        holder: 'chat'
       })
     } catch (err) {
       // AD-5: a missing binary / invalid config is a definite rejection —
@@ -1186,7 +1182,8 @@ async function openHistorySessionInner(
               ...s.sessions,
               [id]: clearingPending ? { ...session, replaying: null } : session
             },
-            id
+            id,
+            keepRestoredError
           )
         }
       })
@@ -1228,7 +1225,7 @@ async function openHistorySessionInner(
         return
       }
       mergeReopenOutcomeIfUnchanged(set, id, reopenGeneration, reopenBaseline, outcome)
-      set((s) => ({ sessions: withSessionActive(s.sessions, id) }))
+      set((s) => ({ sessions: withSessionActive(s.sessions, id, keepRestoredError) }))
       scheduleReplayEnd(set, id, reopenGeneration)
       return
     } catch (err) {
@@ -1280,7 +1277,8 @@ async function openHistorySessionInner(
               ...s.sessions,
               [id]: clearingPending ? { ...session, replaying: null } : session
             },
-            id
+            id,
+            keepRestoredError
           )
         }
       })
@@ -1900,16 +1898,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       if (!reopened || reopened.status === 'closed') return
       if (options?.resend === false) return
       // Re-send the last user prompt to produce a fresh assistant turn (retry).
-      // `switch-splice:` records are projected pre-switch history — retrying
-      // one would re-send the OLD agent's prompt to the new session.
-      const msgs = get().messages[sessionId] ?? []
-      let lastUserBlocks: ContentBlock[] | null = null
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user' && !msgs[i].id.startsWith(SWITCH_SPLICE_ID_PREFIX)) {
-          lastUserBlocks = msgs[i].blocks
-          break
-        }
-      }
+      const lastUserBlocks = lastOwnUserPromptBlocks(get().messages[sessionId] ?? [])
       if (!lastUserBlocks || lastUserBlocks.length === 0) return
       // Sanitized WIRE blocks: the stored display text carries private-use
       // pill sentinels (command/skill/file tokens); map each text block to

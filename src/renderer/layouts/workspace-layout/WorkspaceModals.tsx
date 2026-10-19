@@ -12,11 +12,13 @@ import {
   type WorkspaceCloseDialogsProps
 } from '@/layouts/workspace-layout/WorkspaceCloseDialogs'
 import { WorktreeCreateModalHost } from '@/layouts/workspace-layout/WorktreeCreateModalHost'
+import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useReportBugOpen, useReportBugStore } from '@/stores/report-bug-store'
 import { useSettingsModalView } from '@/stores/settings-modal-store'
 import { useThemePickerOpen } from '@/stores/theme-picker-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
+import type { TerminalProfile } from '@/types/settings'
 
 const CommandHistoryModal = lazy(() =>
   import('@/components/CommandHistoryModal').then((m) => ({
@@ -59,6 +61,7 @@ interface WorkspaceModalsProps extends WorkspaceCloseDialogsProps {
   paletteData: ReturnType<typeof useCommandPaletteData>
   shortcutLabels: ReturnType<typeof useShortcutLabels>
   handleAddTerminal: (paneId: string | undefined, shell?: ShellInfo) => void
+  handleOpenTerminalProfile: (profile: TerminalProfile) => void
   handleLaunchAgent: () => Promise<void>
   handleNewBrowserTab: (paneId?: string) => void
   handleOpenCanvas: () => void
@@ -85,6 +88,7 @@ export function WorkspaceModals({
   paletteData,
   shortcutLabels,
   handleAddTerminal,
+  handleOpenTerminalProfile,
   handleLaunchAgent,
   handleNewBrowserTab,
   handleOpenCanvas,
@@ -96,6 +100,7 @@ export function WorkspaceModals({
 }: WorkspaceModalsProps): React.JSX.Element {
   const settingsModalView = useSettingsModalView()
   const isThemePickerOpen = useThemePickerOpen()
+  const terminalProfiles = useAppSettingsStore((state) => state.settings.terminalProfiles)
   const isReportBugOpen = useReportBugOpen()
   const { sshProfiles, handleSSHConnect } = ssh
   const {
@@ -143,6 +148,8 @@ export function WorkspaceModals({
               isMobileWebShell ? (id) => switchProjectFromPalette(id) : selectProject
             }
             onAddTerminal={() => handleAddTerminal(undefined)}
+            terminalProfiles={terminalProfiles}
+            onOpenTerminalProfile={handleOpenTerminalProfile}
             onShowAgentLauncher={() => {
               const paneId = useWorkspaceStore.getState().activePaneId
               if (paneId) {

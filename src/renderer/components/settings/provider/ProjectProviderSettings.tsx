@@ -11,7 +11,14 @@ import type { ProjectClaudeAccountDraft } from '@/hooks/use-project-claude-accou
 import { claudeAccountsApi, isClaudeLoginCancelled } from '@/lib/claude-accounts-api'
 import { formatUsageReset, usageTone, usageWindowLabel } from '@/lib/claude-usage-format'
 import { cn } from '@/lib/utils'
-import { accountStatus, PERCENT_TEXT, StatusDot, UsageBar } from './account-status'
+import {
+  accountReadiness,
+  accountStatus,
+  NOT_READY_REASON,
+  PERCENT_TEXT,
+  StatusDot,
+  UsageBar
+} from './account-status'
 import { AccountAvatar, DefaultPill } from './ClaudeAccountRow'
 import { oldestCheck, ProviderGroupHeader } from './ProviderGroupHeader'
 
@@ -65,6 +72,7 @@ function CompactUsage({
 interface OptionProps {
   id: string
   selected: boolean
+  disabled: boolean
   onSelect: () => void
   onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void
   leading: React.ReactNode
@@ -73,14 +81,25 @@ interface OptionProps {
   trailing: React.ReactNode
 }
 
-function Option({ id, selected, onSelect, onKeyDown, leading, title, sub, trailing }: OptionProps) {
+function Option({
+  id,
+  selected,
+  disabled,
+  onSelect,
+  onKeyDown,
+  leading,
+  title,
+  sub,
+  trailing
+}: OptionProps) {
   return (
     <div
       id={id}
       role="option"
       aria-selected={selected}
+      aria-disabled={disabled || undefined}
       tabIndex={selected ? 0 : -1}
-      onClick={onSelect}
+      onClick={disabled ? undefined : onSelect}
       onKeyDown={onKeyDown}
       data-option
       className={cn(
@@ -88,7 +107,8 @@ function Option({ id, selected, onSelect, onKeyDown, leading, title, sub, traili
         'focus-visible:ring-1 focus-visible:ring-ring',
         selected
           ? 'bg-foreground/[0.03] ring-1 ring-inset ring-foreground/[0.12]'
-          : 'hover:bg-foreground/[0.02]'
+          : !disabled && 'hover:bg-foreground/[0.02]',
+        disabled && 'opacity-60'
       )}
     >
       {leading}
@@ -114,12 +134,12 @@ interface ProjectProviderSettingsProps {
   claude: ProjectClaudeAccountDraft
   /** The user changed a choice (marks the Project Settings form dirty). */
   onChange: () => void
-  /** Open Settings → Provider to add or sign in to accounts. */
+  /** Open Preferences → Accounts to add or sign in to accounts. */
   onManageAccounts: () => void
 }
 
 /**
- * Project Settings → Provider: one pick-one list per provider ("Follow
+ * Project settings → Accounts: one pick-one list per provider ("Follow
  * default" first, then each Account), and the one action that fixes a problem
  * with the chosen Account. Claude Code is the first provider.
  */
@@ -132,8 +152,15 @@ export function ProjectProviderSettings({
   const listRef = useRef<HTMLDivElement>(null)
   const [signingIn, setSigningIn] = useState(false)
 
+  const readinessOf = (accountId: string | null) => {
+    const account = snapshot?.accounts.find(
+      (a) => a.id === (accountId ?? snapshot.defaultAccountId)
+    )
+    return account ? accountReadiness(account, usage[account.id]) : 'ready'
+  }
+
   const choose = (accountId: string | null): void => {
-    if (accountId === claude.value) return
+    if (accountId === claude.value || readinessOf(accountId) !== 'ready') return
     claude.setValue(accountId)
     onChange()
   }
@@ -246,6 +273,7 @@ export function ProjectProviderSettings({
   }
 
   const defaultStatus = defaultAccount ? statusOf(defaultAccount) : null
+  const defaultReadiness = readinessOf(null)
 
   return (
     <div className="flex flex-col gap-3">
@@ -260,6 +288,7 @@ export function ProjectProviderSettings({
         <Option
           id={`claude-option-${FOLLOW_DEFAULT}`}
           selected={claude.value === null}
+          disabled={defaultReadiness !== 'ready'}
           onSelect={() => choose(null)}
           onKeyDown={(event) => onOptionKeyDown(event, null)}
           leading={
@@ -273,8 +302,9 @@ export function ProjectProviderSettings({
           title="Follow default"
           sub={
             <span className="truncate">
-              {defaultAccount ? `Uses ${defaultAccount.name} now. ` : ''}Changes when you change the
-              default.
+              {defaultAccount && defaultReadiness !== 'ready'
+                ? `Uses ${defaultAccount.name}: ${NOT_READY_REASON[defaultReadiness].toLowerCase()}. Sign in from Manage accounts.`
+                : `${defaultAccount ? `Uses ${defaultAccount.name} now. ` : ''}Changes when you change the default.`}
             </span>
           }
           trailing={
@@ -294,6 +324,7 @@ export function ProjectProviderSettings({
               key={account.id}
               id={`claude-option-${account.id}`}
               selected={claude.value === account.id}
+              disabled={readinessOf(account.id) !== 'ready'}
               onSelect={() => choose(account.id)}
               onKeyDown={(event) => onOptionKeyDown(event, account.id)}
               leading={<AccountAvatar name={account.name} />}
@@ -307,11 +338,13 @@ export function ProjectProviderSettings({
                 <>
                   <StatusDot tone={status.tone} />
                   <span className="truncate">
-                    {status.tone !== 'ok'
-                      ? status.meta
-                      : status.meta === 'Signed in'
-                        ? 'Signed in'
-                        : `${status.meta} · signed in`}
+                    {readinessOf(account.id) !== 'ready'
+                      ? `${status.meta} · sign in from Manage accounts`
+                      : status.tone !== 'ok'
+                        ? status.meta
+                        : status.meta === 'Signed in'
+                          ? 'Signed in'
+                          : `${status.meta} · signed in`}
                   </span>
                 </>
               }
@@ -390,7 +423,7 @@ export function ProjectProviderSettings({
 
       <p className="flex items-center gap-1.5 px-3 text-2xs text-muted-foreground">
         <Info size={12} className="shrink-0" />
-        New Claude Agent chats here use this account. Open chats switch when they start again.
+        Claude Agent chats here use this account. Open chats restart on it when you save.
       </p>
 
       <p className="mt-1 border-t border-border/60 px-3 pt-3 text-2xs text-muted-foreground">

@@ -497,6 +497,9 @@ The class column is the request's command class, defined in `src-tauri/src/web/c
 | `store_delete` | idempotent | Deletes a key of the host store. |
 | `watch` | read | Subscribes to a state watch and queues its full state. See "State watches". |
 | `unwatch` | read | Drops a state watch. Idempotent. |
+| `canvas_mount` | idempotent | Tells the host this connection runs a project's canvas mount (`{projectId, mountSeq}`). Replies `{attached: true}`, or `{attached: false, heldElsewhere}` when the host holds no such mount for this renderer. The host then forwards agent canvas calls to the connection as `canvas_call` frames. |
+| `canvas_unmount` | idempotent | Tells the host this connection no longer runs the mount (`{projectId, mountSeq}`) and replies `{unmounted}`. The mount itself closes only through the host's save-then-close sequence. |
+| `canvas_reply` | idempotent | Answers one `canvas_call` (`{callId, mountSeq, ok}` plus a `result` or an `error`) and replies `{resolved}`. A reply to a call that is no longer waiting is ignored. A `result` too long for one message (`/ws` takes at most 16 MiB a frame and 64 MiB a message from any peer) goes as several `canvas_reply`, each with `partial: true` but the last; the host joins them (up to 256 MiB) and answers a partial one `{accepted}`, which is `false` once the call is gone or the reply passed the limit. |
 
 ### Events
 
@@ -510,7 +513,7 @@ A session log event has one of three delivery tiers (`tier_of` in `src-tauri/src
 | `acp:agent_spawned` | agent | `agents` watch delta. Emitted when `initialize` completes. Carries the advertised `authMethods`. |
 | `acp:agent_crashed` | agent | `agents` watch delta. Emitted before `acp:agent_disconnected` and `acp:agent_error` when the subprocess crashes. |
 | `acp:agent_disconnected` | agent | `agents` watch delta. Emitted when an agent ends, with a `reason`. |
-| `acp:agent_error` | agent or session | Session log event (reliable) when a turn fails. `agents` watch delta for an agent-level error. |
+| `acp:agent_error` | agent or session | Session log event (reliable) when a turn fails. `agents` watch delta for an agent-level error. `message` is the agent's own error message, masked and capped. `data` is the agent's error data with secret-named keys dropped, secret-looking text masked, and a truncated JSON string in place of data over 4,000 characters. `acp:agent_crashed` carries the same `message` and `data`. |
 | `acp:session_created` | session | Session log event (reliable). |
 | `acp:session_closed` | session | Session log event (reliable). `reason` is `killed`, `reaped`, `crashed` or `closed`. |
 | `acp:session_info_update` | session | Session log event (reliable). Carries the agent-supplied title and metadata. |

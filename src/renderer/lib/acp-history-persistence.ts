@@ -2,7 +2,7 @@
 
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
 import type { PersistedSessionSummary } from '@shared/types/web-protocol.types'
-import type { AvailableCommand, ToolCall } from '@/lib/acp-api'
+import type { AvailableCommand, StopReason, ToolCall } from '@/lib/acp-api'
 import { acpHistoryApi } from '@/lib/acp-history-api'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { persistenceApi } from '@/lib/api'
@@ -65,6 +65,12 @@ export interface SessionIndexEntry {
    */
   turnActive?: boolean
   /**
+   * How the last turn failed, when it ended in an `error`, `timeout` or
+   * `crashed` terminator and no prompt followed. Present on session payloads
+   * only; absent on older hosts.
+   */
+  lastTurnError?: PersistedTurnError
+  /**
    * Worktree path + branch the agent runs in (CAP-3). Additive: absent on
    * pre-feature sessions. Powers the CAP-6 indicator + the deleted-worktree
    * fallback; state isolation still keys on `cwd`.
@@ -91,6 +97,15 @@ export interface SessionIndexEntry {
    * multi-switch.
    */
   agents?: string[]
+}
+
+/** The failure behind a failed turn's terminator, as the host recorded it. */
+export interface PersistedTurnError {
+  stopReason: StopReason
+  /** Absent when the host recorded no detail (a `crashed` terminator). */
+  message?: string
+  code?: number
+  providerCode?: string
 }
 
 export interface SessionPayload {
@@ -455,6 +470,12 @@ function historyMode(): 'server' | 'live_only' | 'tauri_store' | undefined {
   return getAcpTransport().historyMode?.()
 }
 
+/**
+ * The title both host readers (desktop `acp_history` list, web summary
+ * conversion) give a session the host has not titled yet.
+ */
+export const UNTITLED_HOST_TITLE = 'Untitled Chat'
+
 export function fromPersistedSessionSummary(entry: PersistedSessionSummary): SessionIndexEntry {
   return {
     id: entry.sessionId,
@@ -462,7 +483,7 @@ export function fromPersistedSessionSummary(entry: PersistedSessionSummary): Ses
     agentConfigId: entry.stableAgentNamespace?.startsWith('config:')
       ? entry.stableAgentNamespace.slice('config:'.length)
       : undefined,
-    title: entry.title ?? 'Untitled Chat',
+    title: entry.title ?? UNTITLED_HOST_TITLE,
     cwd: entry.cwd,
     projectId: entry.projectId ?? '',
     createdAt: entry.createdAt,

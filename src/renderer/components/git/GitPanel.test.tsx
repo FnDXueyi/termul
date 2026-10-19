@@ -18,6 +18,7 @@ const { getDiff, generateCommitMessage, commit, toastError, acpState, gitState }
         generateCommitMessage
       },
       gitState: {
+        errors: {},
         statuses: {
           '/work': [
             { path: 'a.ts', staged: true, status: 'modified' },

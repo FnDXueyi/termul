@@ -28,48 +28,34 @@ export interface ModelCatalog {
   currentValue: string | null
 }
 
-export interface CapabilityItem {
-  name: string
-}
-
-export interface CapabilityRow {
-  label: string
-  items: CapabilityItem[]
-}
-
 /**
- * What an agent advertised at `initialize`, as read-only rows. Text and stdio
- * are the ACP baseline every agent supports, so a row appears only when the
- * agent sent that capability block.
+ * What an agent advertised at `initialize`, one line per capability block,
+ * for the tooltip on that agent's model rows. Text and stdio are the ACP
+ * baseline every agent supports, so a line appears only when the agent sent
+ * that block. Null when it sent neither.
  */
-export function capabilityRows(
+export function capabilitySummary(
   capabilities: AgentCapabilities | null | undefined
-): CapabilityRow[] {
-  const rows: CapabilityRow[] = []
+): string | null {
+  const lines: string[] = []
   const prompt = capabilities?.promptCapabilities
   if (prompt) {
-    const extras: CapabilityItem[] = []
-    if (prompt.image) extras.push({ name: 'Images' })
-    if (prompt.audio) {
-      extras.push({ name: 'Audio (cannot attach yet)' })
-    }
-    if (prompt.embeddedContext) extras.push({ name: 'Embedded context' })
-    rows.push({
-      label: 'Accepts',
-      items: extras.length > 0 ? [{ name: 'Text' }, ...extras] : [{ name: 'Text only' }]
-    })
+    const extras: string[] = []
+    if (prompt.image) extras.push('Images')
+    if (prompt.audio) extras.push('Audio (cannot attach yet)')
+    if (prompt.embeddedContext) extras.push('Embedded context')
+    lines.push(`Accepts: ${extras.length > 0 ? ['Text', ...extras].join(' · ') : 'Text only'}`)
   }
   const mcp = capabilities?.mcpCapabilities
   if (mcp) {
-    const extras: CapabilityItem[] = []
-    if (mcp.http) extras.push({ name: 'HTTP' })
-    if (mcp.sse) extras.push({ name: 'SSE' })
-    rows.push({
-      label: 'MCP servers',
-      items: extras.length > 0 ? [{ name: 'stdio' }, ...extras] : [{ name: 'stdio only' }]
-    })
+    const extras: string[] = []
+    if (mcp.http) extras.push('HTTP')
+    if (mcp.sse) extras.push('SSE')
+    lines.push(
+      `MCP servers: ${extras.length > 0 ? ['stdio', ...extras].join(' · ') : 'stdio only'}`
+    )
   }
-  return rows
+  return lines.length > 0 ? lines.join('\n') : null
 }
 
 export function catalogModels(option: SessionConfigOption): CatalogModel[] {

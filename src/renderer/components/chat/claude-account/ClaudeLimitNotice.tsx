@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { AlertCircle, ChevronDown, Clock, Shuffle, X } from '@/components/icons'
+import { toastAccountChoiceError } from '@/components/settings/provider/account-choice-error'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -16,7 +17,8 @@ import { formatUsageReset } from '@/lib/claude-usage-format'
 import { logFrontendError } from '@/lib/log-api'
 import { restartClaudeSession, switchProjectClaudeAccount } from '@/stores/claude-account-switch'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
-import { type AccountChoice, useChatClaudeAccount } from './use-chat-claude-account'
+import { useChatClaudeAccount } from './use-chat-claude-account'
+import type { AccountChoice } from './use-project-claude-account'
 
 /** Grace after a reset time before the prompt is sent again. */
 const RESUME_GRACE_MS = 15_000
@@ -116,7 +118,8 @@ export function ClaudeLimitNotice({ sessionId }: { sessionId: string }): React.J
       await reloadAccounts()
       toast.success(`Switched to ${target.account.name}`)
     } catch (err) {
-      toast.error(`Could not switch: ${err instanceof Error ? err.message : String(err)}`)
+      toastAccountChoiceError(err, 'Could not switch')
+      void reloadAccounts()
     } finally {
       setSwitchingTo(null)
     }
@@ -253,7 +256,12 @@ export function ClaudeLimitNotice({ sessionId }: { sessionId: string }): React.J
               </Button>
             )}
             {claudeAccountsApi.canManageAccounts() && (
-              <Button type="button" size="xs" variant="ghost" onClick={() => openAppSettings()}>
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={() => openAppSettings('provider')}
+              >
                 Add account
               </Button>
             )}

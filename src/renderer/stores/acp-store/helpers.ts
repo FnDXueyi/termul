@@ -16,6 +16,7 @@ import {
   type ContentBlock,
   type McpServer,
   type PlanEntry,
+  parseAcpErrorDetail,
   type SessionConfigOption,
   type SessionConfigOptionEntry,
   type SessionId,
@@ -27,12 +28,20 @@ import {
 import {
   type AgentSwitchRecord,
   maxPayloadSeq,
-  type SessionIndexEntry
+  type PersistedTurnError,
+  type SessionIndexEntry,
+  UNTITLED_HOST_TITLE
 } from '@/lib/acp-history-persistence'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { agentConfigIdentityKey } from '@/lib/agents/acp-config-identity'
 import { type AgentAuthPolicy, agentPolicyForConfigId } from '@/lib/agents/acp-registry'
-import { classifySetupError, isAgentAuthRequiredError } from '@/lib/agents/acp-spawn-errors'
+import {
+  classifySetupError,
+  claudeAccountSignedOutMessage,
+  describeProviderFailure,
+  isAgentAuthRequiredError,
+  isClaudeAccountSignedOutError
+} from '@/lib/agents/acp-spawn-errors'
 import { logFrontendError } from '@/lib/log-api'
 import {
   isFolderTokenPath,
@@ -43,6 +52,7 @@ import {
 } from '@/lib/skill-tokens'
 import { wireBlocksToDisplay, wireTextToDisplay } from '@/lib/skills-wire-reverse'
 import { randomUUID } from '@/lib/uuid'
+import { isAfter, type LogPoint } from '@/stores/agent-chat-unread-store'
 import {
   configIdFromReuseKey,
   detachedReuseKey,
@@ -55,7 +65,7 @@ import {
   type QueuedPrompt,
   sessionTurnBusy
 } from '../prompt-queue-orchestration'
-import { ephemeralSessionIds } from './ephemeral-ids'
+import { ephemeralSessionIds, stoppingAgentIds } from './ephemeral-ids'
 import { isIndexedRealSession } from './live-turn'
 import { modelCatalogFromOptions, persistModelCatalog } from './model-catalog'
 
@@ -488,14 +498,47 @@ export function finalizeStreaming(
   }
 }
 
-/** Mark a reopened history session live after a successful load/resume IPC call. */
+/**
+ * Mark a reopened history session live after a successful load/resume IPC
+ * call. `keepLastError` keeps the failed-turn error the reopen restored from
+ * the payload instead of clearing it.
+ */
 export function withSessionActive(
   sessions: Record<SessionId, AcpSession>,
-  sessionId: SessionId
+  sessionId: SessionId,
+  keepLastError = false
 ): Record<SessionId, AcpSession> {
   const session = sessions[sessionId]
   if (!session) return sessions
-  return { ...sessions, [sessionId]: { ...session, status: 'active', ...plainLastError(null) } }
+  return {
+    ...sessions,
+    [sessionId]: {
+      ...session,
+      status: 'active',
+      ...(keepLastError ? {} : plainLastError(null))
+    }
+  }
+}
+
+/**
+ * The banner fields for the last turn's failure recorded in a session
+ * payload. Mirrors what the live `agent_error` handler writes: the provider
+ * wording when the host classified one, else the message, falling back to the
+ * stop-reason note when the host kept no detail. The host persists no error
+ * `data`, so a restored banner has none.
+ */
+export function lastErrorFromPersistedTurn(turn: PersistedTurnError | undefined): LastErrorFields {
+  if (!turn) return plainLastError(null)
+  const message = turn.message || noteForStopReason(turn.stopReason)
+  if (message === null) return plainLastError(null)
+  const detail = parseAcpErrorDetail(turn)
+  return {
+    lastError: detail.providerCode
+      ? describeProviderFailure(detail.providerCode, message)
+      : message,
+    lastErrorCode: detail.code ?? null,
+    lastErrorData: undefined
+  }
 }
 
 export function plainLastError(message: string | null): LastErrorFields {
@@ -527,7 +570,9 @@ export function withSessionResumeError(
     [sessionId]: {
       ...session,
       replaying: null,
-      ...plainLastError(`${RESUME_FAILED_PREFIX}${String(err)}`)
+      ...plainLastError(
+        `${RESUME_FAILED_PREFIX}${isClaudeAccountSignedOutError(err) ? claudeAccountSignedOutMessage(err) : String(err)}`
+      )
     }
   }
 }
@@ -777,26 +822,26 @@ export function nextQueueId(): string {
 
 /**
  * Install `list` as the session's slash commands unless the store holds a
- * list from a newer record. `seq` is the seq of the `commands_update` record
- * that set the list; a list without one (an older host) installs and drops
- * the held seq.
+ * list from a newer record of the same log incarnation. `point` locates the
+ * `commands_update` record that set the list; a list without one (an older
+ * host) installs and drops the held point.
  */
 export function withCommands(
   state: Pick<AcpState, 'commands' | 'commandsSeq'>,
   sessionId: SessionId,
   list: AvailableCommand[],
-  seq: number | undefined
+  point: LogPoint | undefined
 ): Pick<AcpState, 'commands' | 'commandsSeq'> {
   const held = state.commandsSeq[sessionId]
-  if (seq !== undefined && held !== undefined && seq < held) {
+  if (point !== undefined && held !== undefined && !isAfter(point, held) && point.seq < held.seq) {
     return { commands: state.commands, commandsSeq: state.commandsSeq }
   }
   return {
     commands: { ...state.commands, [sessionId]: list },
     commandsSeq:
-      seq === undefined
+      point === undefined
         ? dropRecordKey(state.commandsSeq, sessionId)
-        : { ...state.commandsSeq, [sessionId]: seq }
+        : { ...state.commandsSeq, [sessionId]: point }
   }
 }
 
@@ -974,11 +1019,21 @@ export function mergeSessionIndexEntries(
             turnActive: mergeTurnActive(entry.turnActive, hostEntry.turnActive, true)
           }
         }
-      } else if (entry.turnActive === true && hostEntry.turnActive === undefined) {
-        // The host index omits `turnActive`. A newer host row must not erase
-        // a live-turn flag the client already projected.
+      } else {
+        // A newer host row must not erase what the client already projected
+        // and the host cannot know yet: the host titles a chat only once its
+        // first prompt is durable (a promoted warm session registers
+        // untitled), and its index omits `turnActive`.
+        const keepTitle = hostEntry.title === UNTITLED_HOST_TITLE
+        const keepTurn = entry.turnActive === true && hostEntry.turnActive === undefined
         const idx = merged.findIndex((e) => e.id === entry.id)
-        if (idx >= 0) merged[idx] = { ...hostEntry, turnActive: true }
+        if ((keepTitle || keepTurn) && idx >= 0) {
+          merged[idx] = {
+            ...hostEntry,
+            ...(keepTitle ? { title: entry.title } : {}),
+            ...(keepTurn ? { turnActive: true } : {})
+          }
+        }
       }
     } else if (liveSessionIds.has(entry.id) && !mergedIds.has(entry.id)) {
       // Host omits it but it is a live session (created/restored locally and
@@ -1384,7 +1439,11 @@ export function cacheOptionsFromSession(set: AcpSet, get: AcpGet, sessionId: Ses
 }
 
 /** Best-effort tear-down for a session created by a cancelled/stale prepare. */
-export function reapOrphanPreparedSession(get: AcpGet, set: AcpSet, sessionId: SessionId): void {
+export function reapOrphanPreparedSession(
+  get: AcpGet,
+  set: AcpSet,
+  sessionId: SessionId
+): Promise<void> {
   // Index membership is the placeholder check. A host id may start with
   // `launch-`; that prefix is only a renderer tab convention.
   if (isIndexedRealSession(get().sessionIndex, sessionId)) {
@@ -1394,22 +1453,23 @@ export function reapOrphanPreparedSession(get: AcpGet, set: AcpSet, sessionId: S
       source: 'acp.reapOrphanPreparedSession',
       message: `Skipped teardown of indexed session ${sessionId}; orphan reap must not close or delete a persisted chat`
     })
-    return
+    return Promise.resolve()
   }
   // createSession may have set activeSessionId as a side effect; that must not
   // block reaping a session that never became a published preparedSessions entry.
   set((s) => (s.activeSessionId === sessionId ? { activeSessionId: null } : s))
   const agentId = get().sessions[sessionId]?.agentId
-  const disposed = agentId
-    ? acpApi.disposeEphemeralSession(agentId, sessionId).catch((error) => {
-        void logFrontendError({
-          level: 'warn',
-          source: 'acp.reapOrphanPreparedSession',
-          message: `Failed to dispose warm session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
+  const disposed =
+    agentId && !stoppingAgentIds.has(agentId)
+      ? acpApi.disposeEphemeralSession(agentId, sessionId).catch((error) => {
+          void logFrontendError({
+            level: 'warn',
+            source: 'acp.reapOrphanPreparedSession',
+            message: `Failed to dispose warm session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
+          })
         })
-      })
-    : Promise.resolve()
-  void disposed
+      : Promise.resolve()
+  return disposed
     .then(() => get().deleteHistorySession(sessionId))
     .finally(() => {
       ephemeralSessionIds.delete(sessionId)
@@ -1727,6 +1787,20 @@ export function resolveSwitchRedirect(
 export const SWITCH_SPLICE_ID_PREFIX = 'switch-splice:'
 
 /**
+ * The display blocks of the chat's last own user prompt, for a re-send.
+ * `switch-splice:` records are projected pre-switch history: re-sending one
+ * would send the OLD agent's prompt to the new session.
+ */
+export function lastOwnUserPromptBlocks(messages: ChatMessage[]): ContentBlock[] | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' && !messages[i].id.startsWith(SWITCH_SPLICE_ID_PREFIX)) {
+      return messages[i].blocks
+    }
+  }
+  return null
+}
+
+/**
  * Story 3 (CAP-7): splice a session's installed pre-switch transcript into the
  * redirect target's transcript under ONE consistent namespace.
  * Seq/id collision fix: the old session's durable records carry per-session
@@ -1735,8 +1809,9 @@ export const SWITCH_SPLICE_ID_PREFIX = 'switch-splice:'
  * target's own records interleaves the merged timeline wrongly (buildTimeline
  * sorts seq-first) and collides ids (duplicate React keys, wrong
  * `_onUserPrompt` dedup matches). Every spliced record is re-stamped:
- * `seq = (floor - 1000) + original seq` (a NEGATIVE band below the target's
- * whole seq space — spliced records sort before every target record) and
+ * `seq = original seq + floor - (source's highest seq) - 1` (a NEGATIVE band
+ * whose top sits just below the target's whole seq space — spliced records
+ * sort before every target record, however long the source ran) and
  * `id = switch-splice:<source session>:<original id>` — so the merged
  * timeline orders old-before-new with ids unique across hops.
  *
@@ -1764,7 +1839,7 @@ export function spliceSwitchTranscript(
     ...targetToolCalls.map((t) => (typeof t.seq === 'number' ? t.seq : 0)),
     ...targetSwitches.map((sw) => (typeof sw.seq === 'number' ? sw.seq : 0))
   )
-  const offset = floor - 1000
+  const offset = floor - maxPayloadSeq(installed) - 1
   // Namespaced ids: two hops may share original ids (each session's log
   // restarts its seq space), so the source session id keeps the React keys
   // unique.

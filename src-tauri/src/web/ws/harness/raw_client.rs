@@ -3,7 +3,8 @@
 //! The carrier harness ([`super::carrier`]) replaces the wire in-process; this
 //! client covers the paths that need a REAL upgraded socket owned by the real
 //! `axum::serve` task (host stop). It speaks just enough of
-//! the protocol: the handshake and unmasked server frames in.
+//! the protocol: the handshake, unmasked server frames in, and masked text
+//! frames out.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -59,6 +60,28 @@ impl RawWsClient {
         let headers = String::from_utf8_lossy(&headers);
         assert!(headers.contains(" 101 "), "upgrade must succeed: {headers}");
         Self { stream }
+    }
+
+    /// Send `text` as one masked text frame, as a browser does. An error is
+    /// the host closing the socket before the frame was written whole.
+    pub(crate) async fn send_text(&mut self, text: &str) -> std::io::Result<()> {
+        const MASK: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
+        let payload = text.as_bytes();
+        let mut frame = vec![0x80 | OP_TEXT];
+        match payload.len() {
+            len @ 0..=125 => frame.push(0x80 | len as u8),
+            len @ 126..=0xffff => {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(len as u16).to_be_bytes());
+            }
+            len => {
+                frame.push(0x80 | 127);
+                frame.extend_from_slice(&(len as u64).to_be_bytes());
+            }
+        }
+        frame.extend_from_slice(&MASK);
+        frame.extend(payload.iter().zip(MASK.iter().cycle()).map(|(b, m)| b ^ m));
+        self.stream.write_all(&frame).await
     }
 
     /// Read one server frame (unmasked) as `(opcode, payload)`; `None` once

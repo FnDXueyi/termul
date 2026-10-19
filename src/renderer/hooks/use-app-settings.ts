@@ -4,6 +4,7 @@ import { acpApi, persistenceApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
 import { useSharedKeySync } from '@/lib/shared-key-sync'
 import { isTauriContext } from '@/lib/tauri-runtime'
+import { normalizeTerminalProfiles } from '@/lib/terminal-profiles'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
@@ -69,7 +70,11 @@ const RETIRED_SETTING_KEYS = [
  */
 function normalizeStoredSettings(data: AppSettings): { settings: AppSettings; changed: boolean } {
   // Merge with defaults to handle any missing keys from older versions
-  let settings: AppSettings = { ...DEFAULT_APP_SETTINGS, ...data }
+  let settings: AppSettings = {
+    ...DEFAULT_APP_SETTINGS,
+    ...data,
+    terminalProfiles: normalizeTerminalProfiles(data.terminalProfiles)
+  }
   let changed = false
 
   // The per-project terminal limit moved to the host, and a live PTY no
@@ -254,7 +259,7 @@ export function useResetAppSettings(): () => Promise<void> {
     applyPanelVisibility('fileExplorerVisible', true)
     applyPanelVisibility('sshPanelVisible', true)
 
-    await persistenceApi.write(PersistenceKeys.appSettings, DEFAULT_APP_SETTINGS)
+    await persistenceApi.write(PersistenceKeys.appSettings, useAppSettingsStore.getState().settings)
     // Clear the in-process ACP timeout overrides too (mirrors the load
     // hook's push, so a reset doesn't leave stale overrides in the Rust core).
     try {

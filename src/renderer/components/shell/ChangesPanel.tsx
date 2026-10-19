@@ -34,7 +34,8 @@ export function ChangesPanel({ cwd, isVisible }: ChangesPanelProps): React.JSX.E
     searchQuery,
     setSearchQuery,
     stagedFiles,
-    unstagedFiles
+    unstagedFiles,
+    statusError
   } = useGitPanelModel({ cwd, isVisible })
 
   const {
@@ -139,6 +140,7 @@ export function ChangesPanel({ cwd, isVisible }: ChangesPanelProps): React.JSX.E
           variant="column"
           stagedFiles={stagedFiles}
           unstagedFiles={unstagedFiles}
+          statusError={statusError}
           stashes={stashes}
           selectedFile={selectedFile}
           selectedStaged={selectedStaged}

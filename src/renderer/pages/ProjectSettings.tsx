@@ -2,29 +2,14 @@ import type { DetectedShells } from '@shared/types/ipc.types'
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import {
-  ChevronDown,
-  Info,
-  KeyRound,
-  KeySquare,
-  Link2,
-  Plus,
-  RefreshCw,
-  Save,
-  Settings,
-  ShieldAlert,
-  TerminalSquare,
-  Upload,
-  X
-} from '@/components/icons'
+import { ChevronDown, Info, Link2, Plus, RefreshCw, Save, Upload, X } from '@/components/icons'
 import { NewProjectModal } from '@/components/NewProjectModal'
+import { ColorSwatchGroup } from '@/components/settings/ColorSwatchGroup'
+import { toastAccountChoiceError } from '@/components/settings/provider/account-choice-error'
 import { ProjectProviderSettings } from '@/components/settings/provider/ProjectProviderSettings'
-import {
-  type SettingsCategory,
-  SettingsLayout,
-  SettingsSection
-} from '@/components/settings/SettingsLayout'
+import { SettingsLayout, SettingsSection } from '@/components/settings/SettingsLayout'
 import { SettingsModal } from '@/components/settings/SettingsModal'
+import { SettingsNotice } from '@/components/settings/SettingsNotice'
 import { Button } from '@/components/ui/button'
 import { FOCUS_RING_CLASS, PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -32,11 +17,10 @@ import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { useProjectClaudeAccountDraft } from '@/hooks/use-project-claude-account-draft'
 import { dialogApi, filesystemApi, shellApi, worktreeApi } from '@/lib/api'
-import { availableColors, getColorClasses } from '@/lib/colors'
 import { mergeEnvVars, parseEnvFile, resolveProjectEnvPath } from '@/lib/env-parser'
-import type { SettingsSearchEntry } from '@/lib/settings-search'
 import { cn } from '@/lib/utils'
-import { applyProjectClaudeAccount } from '@/stores/claude-account-switch'
+import { renewAgentCredentials } from '@/stores/acp-store'
+import { applyProjectClaudeAccount, CLAUDE_AGENT_CONFIG_ID } from '@/stores/claude-account-switch'
 import {
   useActiveProject,
   useActiveProjectId,
@@ -45,89 +29,17 @@ import {
 } from '@/stores/project-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import type { EnvVariable, ProjectColor } from '@/types/project'
-
-const PROJECT_SETTINGS_CATEGORIES: SettingsCategory[] = [
-  { id: 'general', label: 'General', icon: <Settings size={16} /> },
-  { id: 'env-vars', label: 'Environment Variables', icon: <KeySquare size={16} /> },
-  { id: 'shell', label: 'Shell Settings', icon: <TerminalSquare size={16} /> },
-  { id: 'symlinks', label: 'Worktree Symlinks', icon: <Link2 size={16} /> },
-  { id: 'provider', label: 'Provider', icon: <KeyRound size={16} /> },
-  { id: 'emergency', label: 'Emergency Mode', icon: <ShieldAlert size={16} /> }
-]
-
-const PROJECT_SETTINGS_SEARCH_INDEX: SettingsSearchEntry[] = [
-  {
-    categoryId: 'provider',
-    label: 'Claude account',
-    description: 'Choose the Claude account that chats in this project use.',
-    keywords: ['provider', 'account', 'claude', 'work', 'personal', 'switch']
-  },
-  {
-    categoryId: 'general',
-    label: 'Project Name',
-    description: 'Basic project identification.',
-    keywords: ['rename', 'title']
-  },
-  {
-    categoryId: 'general',
-    label: 'Root Directory',
-    description: 'Project location on disk.',
-    keywords: ['path', 'folder', 'location']
-  },
-  {
-    categoryId: 'general',
-    label: 'Color & Appearance',
-    description: 'Project color and appearance.',
-    keywords: ['theme', 'color']
-  },
-  {
-    categoryId: 'env-vars',
-    label: 'Environment Variables',
-    description: 'Secrets and config injected into your shell session.',
-    keywords: ['env', 'secrets', 'config', 'dotenv']
-  },
-  {
-    categoryId: 'shell',
-    label: 'Default Shell',
-    description: 'Customize the terminal experience for this workspace.',
-    keywords: ['bash', 'zsh', 'powershell']
-  },
-  {
-    categoryId: 'shell',
-    label: 'Startup Command',
-    description: 'Command to execute when a new terminal session starts.',
-    keywords: ['init', 'startup', 'command']
-  },
-  {
-    categoryId: 'symlinks',
-    label: 'Worktree Symlinks',
-    description: 'Directories to symlink from the project root into worktrees.',
-    keywords: ['node_modules', 'gitignore', 'shared dependencies']
-  },
-  {
-    categoryId: 'emergency',
-    label: 'Skip Confirmation Dialogs',
-    description: 'Bypass non-essential prompts during worktree operations.',
-    keywords: ['emergency', 'confirm']
-  },
-  {
-    categoryId: 'emergency',
-    label: 'Skip .gitignore Selection',
-    description: 'Use default symlink settings when creating worktrees.',
-    keywords: ['emergency', 'gitignore']
-  },
-  {
-    categoryId: 'emergency',
-    label: 'Default Branch Prefix',
-    description: 'Prefix for new branch naming.',
-    keywords: ['branch', 'feature', 'hotfix']
-  }
-]
+import {
+  PROJECT_SETTINGS_CATEGORIES,
+  PROJECT_SETTINGS_SEARCH_INDEX
+} from './project-settings/categories'
 
 export function ProjectSettingsModal() {
   const isOpen = useSettingsModalStore((state) => state.view === 'project')
   const close = useSettingsModalStore((state) => state.close)
   const openAppSettings = useSettingsModalStore((state) => state.openApp)
+  const projectPage = useSettingsModalStore((state) => state.projectPage)
+  const setProjectPage = useSettingsModalStore((state) => state.setProjectPage)
   const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState(false)
   const [isCloseConfirmOpen, setIsCloseConfirmOpen] = useState(false)
   const activeProject = useActiveProject()
@@ -269,15 +181,16 @@ export function ProjectSettingsModal() {
         symlinkDirs: normalizedSymlinkDirs
       })
       const projectId = activeProject.id
+      // Before the host write, as the launcher chip does: a chat started while
+      // the save runs must not land on an agent of the old Account.
+      if (claudeAccountDraft.dirty) renewAgentCredentials(CLAUDE_AGENT_CONFIG_ID, projectId)
       void claudeAccountDraft
         .save()
         .then((changed) => {
-          if (changed) void applyProjectClaudeAccount(projectId)
+          if (changed) void applyProjectClaudeAccount(projectId, { credentialsRenewed: true })
         })
         .catch((err) => {
-          toast.error(
-            `Could not save the Claude account: ${err instanceof Error ? err.message : String(err)}`
-          )
+          toastAccountChoiceError(err, 'Could not save the Claude account')
         })
       setEnvVars(normalizedEnvVars)
       setSymlinkDirs(normalizedSymlinkDirs)
@@ -426,9 +339,7 @@ export function ProjectSettingsModal() {
       <SettingsModal
         isOpen={isOpen}
         onClose={handleClose}
-        title="Project Settings"
-        subtitle={activeProject?.name ? `Configuration for ${activeProject.name}` : undefined}
-        icon={<Settings size={20} />}
+        title="Project settings"
         footer={
           hasChanges ? (
             <div className="p-4 flex justify-end items-center gap-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)]">
@@ -458,180 +369,161 @@ export function ProjectSettingsModal() {
         {/* Content */}
         <SettingsLayout
           title="Project settings"
+          subtitle={activeProject?.name}
           categories={PROJECT_SETTINGS_CATEGORIES}
           searchIndex={PROJECT_SETTINGS_SEARCH_INDEX}
+          onClose={handleClose}
+          page={projectPage ?? PROJECT_SETTINGS_CATEGORIES[0]?.id}
+          onPageChange={setProjectPage}
         >
           {/* General Section */}
           <SettingsSection id="general">
-            <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-              <div className="w-full pt-1 md:w-1/3">
-                <h2 className="text-lg font-medium text-foreground">General</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Basic project identification and location.
-                </p>
+            <div className="flex flex-col gap-4">
+              <div>
+                <label
+                  htmlFor="project-name"
+                  className="block text-sm font-medium text-secondary-foreground mb-2"
+                >
+                  Project name
+                </label>
+                <input
+                  id="project-name"
+                  type="text"
+                  value={projectName}
+                  onChange={(e) => {
+                    setProjectName(e.target.value)
+                    setHasChanges(true)
+                  }}
+                  className={cn(PANEL_FIELD_CLASS, 'w-full rounded-md px-3 py-2 text-sm')}
+                />
               </div>
-              <div className="w-full space-y-4 md:w-full md:w-2/3">
-                <div>
-                  <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                    Project Name
-                  </label>
+
+              <div>
+                <label
+                  htmlFor="project-root-directory"
+                  className="block text-sm font-medium text-secondary-foreground mb-2"
+                >
+                  Root directory
+                </label>
+                <div className="flex gap-2">
                   <input
+                    id="project-root-directory"
                     type="text"
-                    value={projectName}
+                    value={rootPath}
                     onChange={(e) => {
-                      setProjectName(e.target.value)
+                      setRootPath(e.target.value)
                       setHasChanges(true)
                     }}
-                    className={cn(PANEL_FIELD_CLASS, 'w-full rounded-md px-3 py-2 text-sm')}
+                    className={cn(
+                      PANEL_FIELD_CLASS,
+                      'flex-1 rounded-md px-3 py-2 font-mono text-sm'
+                    )}
                   />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                    Root Directory
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={rootPath}
-                      onChange={(e) => {
-                        setRootPath(e.target.value)
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const result = await dialogApi.selectDirectory()
+                      if (result.success) {
+                        setRootPath(result.data)
                         setHasChanges(true)
-                      }}
-                      className={cn(
-                        PANEL_FIELD_CLASS,
-                        'flex-1 rounded-md px-3 py-2 font-mono text-sm'
-                      )}
-                    />
-                    <button
-                      onClick={async () => {
-                        const result = await dialogApi.selectDirectory()
-                        if (result.success) {
-                          setRootPath(result.data)
-                          setHasChanges(true)
-                        }
-                      }}
-                      className="px-4 py-2 bg-card hover:bg-secondary border border-border rounded-md text-sm text-foreground transition-colors shadow-sm"
-                    >
-                      Browse
-                    </button>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    Changing the root directory only affects new terminals.
-                  </p>
+                      }
+                    }}
+                    className="px-4 py-2 bg-card hover:bg-secondary border border-border rounded-md text-sm text-foreground transition-colors shadow-sm"
+                  >
+                    Browse
+                  </button>
                 </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Changing the root directory only affects new terminals.
+                </p>
+              </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-secondary-foreground mb-3">
-                    Color & Appearance
-                  </label>
-                  <div className="flex gap-2 flex-wrap">
-                    {availableColors.map((color) => {
-                      const colors = getColorClasses(color)
-                      return (
-                        <button
-                          key={color}
-                          onClick={() => {
-                            setSelectedColor(color)
-                            setHasChanges(true)
-                          }}
-                          className={cn(
-                            'w-8 h-8 rounded-full transition-all',
-                            colors.bg,
-                            selectedColor === color
-                              ? 'ring-2 ring-offset-2 ring-offset-background ring-current shadow-sm'
-                              : 'border-2 border-transparent hover:opacity-80'
-                          )}
-                        />
-                      )
-                    })}
-                  </div>
-                </div>
+              <div>
+                <p className="mb-3 text-sm font-medium text-secondary-foreground">Color</p>
+                <ColorSwatchGroup
+                  aria-label="Project color"
+                  value={selectedColor}
+                  onValueChange={(color) => {
+                    setSelectedColor(color)
+                    setHasChanges(true)
+                  }}
+                />
               </div>
             </div>
           </SettingsSection>
 
           {/* Environment Variables Section */}
           <SettingsSection id="env-vars">
-            <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-              <div className="w-full pt-1 md:w-1/3">
-                <h2 className="text-lg font-medium text-foreground">Environment Variables</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Secrets and config injected into your shell session. Secret values are cleared on
-                  app restart until secure storage is added.
-                </p>
-                <button
-                  onClick={addEnvVar}
-                  className="mt-4 text-xs flex items-center text-primary hover:text-primary/80 font-medium transition-colors"
-                >
-                  <Plus size={14} className="mr-1" /> Add Variable
-                </button>
-                <button
-                  onClick={handleImportEnvFile}
-                  className="mt-2 text-xs flex items-center text-primary hover:text-primary/80 font-medium transition-colors"
-                >
-                  <Upload size={14} className="mr-1" /> Import from .env
-                </button>
-                {importError && <p className="mt-2 text-xs text-destructive">{importError}</p>}
-                {importWarnings && (
-                  <p className="mt-2 text-xs text-warning whitespace-pre-line">{importWarnings}</p>
-                )}
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button type="button" size="xs" variant="outline" onClick={handleImportEnvFile}>
+                  <Upload size={13} /> Import from .env
+                </Button>
+                <Button type="button" size="xs" variant="outline" onClick={addEnvVar}>
+                  <Plus size={13} /> Add variable
+                </Button>
               </div>
-              <div className="w-full md:w-2/3">
-                <div className="bg-secondary/30 rounded-lg border border-border overflow-hidden">
-                  <div className="grid grid-cols-[1fr_1.5fr_auto] gap-px bg-border">
-                    <div className="label-section bg-secondary/80 px-4 py-2 text-muted-foreground">
-                      Key
-                    </div>
-                    <div className="label-section bg-secondary/80 px-4 py-2 text-muted-foreground">
-                      Value
-                    </div>
-                    <div className="bg-secondary/80 w-10"></div>
-
-                    {envVars.map((envVar, index) => (
-                      <Fragment key={index}>
-                        <div className="bg-card p-2">
-                          <input
-                            type="text"
-                            value={envVar.key}
-                            onChange={(e) => {
-                              const newVars = [...envVars]
-                              newVars[index].key = e.target.value
-                              setEnvVars(newVars)
-                              setHasChanges(true)
-                            }}
-                            placeholder="KEY"
-                            className={`w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono text-primary rounded px-2 py-1 ${FOCUS_RING_CLASS}`}
-                          />
-                        </div>
-                        <div className="bg-card p-2 relative group">
-                          <input
-                            type={envVar.isSecret ? 'password' : 'text'}
-                            value={envVar.value}
-                            onChange={(e) => {
-                              const newVars = [...envVars]
-                              newVars[index].value = e.target.value
-                              setEnvVars(newVars)
-                              setHasChanges(true)
-                            }}
-                            placeholder="Value"
-                            className={cn(
-                              `w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono rounded px-2 py-1 ${FOCUS_RING_CLASS}`,
-                              envVar.isSecret ? 'text-muted-foreground' : 'text-success'
-                            )}
-                          />
-                        </div>
-                        <div className="bg-card flex items-center justify-center">
-                          <button
-                            onClick={() => removeEnvVar(index)}
-                            className="text-muted-foreground hover:text-destructive p-1 rounded transition-colors"
-                          >
-                            <X size={18} />
-                          </button>
-                        </div>
-                      </Fragment>
-                    ))}
+              {importError && <SettingsNotice tone="danger">{importError}</SettingsNotice>}
+              {importWarnings && (
+                <SettingsNotice tone="warning">
+                  <span className="whitespace-pre-line">{importWarnings}</span>
+                </SettingsNotice>
+              )}
+              <div className="bg-secondary/30 rounded-lg border border-border overflow-hidden">
+                <div className="grid grid-cols-[1fr_1.5fr_auto] gap-px bg-border">
+                  <div className="label-section bg-secondary/80 px-4 py-2 text-muted-foreground">
+                    Key
                   </div>
+                  <div className="label-section bg-secondary/80 px-4 py-2 text-muted-foreground">
+                    Value
+                  </div>
+                  <div className="bg-secondary/80 w-10"></div>
+
+                  {envVars.map((envVar, index) => (
+                    <Fragment key={index}>
+                      <div className="bg-card p-2">
+                        <input
+                          type="text"
+                          value={envVar.key}
+                          onChange={(e) => {
+                            const newVars = [...envVars]
+                            newVars[index].key = e.target.value
+                            setEnvVars(newVars)
+                            setHasChanges(true)
+                          }}
+                          placeholder="KEY"
+                          className={`w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono text-primary rounded px-2 py-1 ${FOCUS_RING_CLASS}`}
+                        />
+                      </div>
+                      <div className="bg-card p-2 relative group">
+                        <input
+                          type={envVar.isSecret ? 'password' : 'text'}
+                          value={envVar.value}
+                          onChange={(e) => {
+                            const newVars = [...envVars]
+                            newVars[index].value = e.target.value
+                            setEnvVars(newVars)
+                            setHasChanges(true)
+                          }}
+                          placeholder="Value"
+                          className={cn(
+                            `w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono rounded px-2 py-1 ${FOCUS_RING_CLASS}`,
+                            envVar.isSecret ? 'text-muted-foreground' : 'text-success'
+                          )}
+                        />
+                      </div>
+                      <div className="bg-card flex items-center justify-center">
+                        <button
+                          type="button"
+                          aria-label={`Remove ${envVar.key || 'variable'}`}
+                          onClick={() => removeEnvVar(index)}
+                          className="text-muted-foreground hover:text-destructive p-1 rounded transition-colors"
+                        >
+                          <X size={18} />
+                        </button>
+                      </div>
+                    </Fragment>
+                  ))}
                 </div>
               </div>
             </div>
@@ -639,206 +531,171 @@ export function ProjectSettingsModal() {
 
           {/* Shell Settings Section */}
           <SettingsSection id="shell">
-            <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-              <div className="w-full pt-1 md:w-1/3">
-                <h2 className="text-lg font-medium text-foreground">Shell Settings</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Customize the terminal experience for this workspace.
-                </p>
-              </div>
-              <div className="w-full space-y-4 md:w-full md:w-2/3">
-                <div>
-                  <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                    Default Shell
-                  </label>
-                  {shellsLoading ? (
-                    <Skeleton className="w-full h-10" />
-                  ) : (
-                    <div className="relative">
-                      <select
-                        value={shell}
-                        onChange={(e) => {
-                          setShell(e.target.value)
-                          setHasChanges(true)
-                        }}
-                        className={cn(
-                          PANEL_FIELD_CLASS,
-                          'w-full cursor-pointer appearance-none rounded-md py-2 pl-3 pr-10 text-sm'
-                        )}
-                      >
-                        {availableShells?.available && availableShells.available.length > 0 ? (
-                          availableShells.available.map((s) => (
-                            <option key={s.name} value={s.name}>
-                              {s.displayName}
-                            </option>
-                          ))
-                        ) : (
-                          <option value="">No shells detected</option>
-                        )}
-                      </select>
-                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground">
-                        <ChevronDown size={14} />
-                      </div>
+            <div className="flex flex-col gap-4">
+              <div>
+                <label
+                  htmlFor="project-default-shell"
+                  className="block text-sm font-medium text-secondary-foreground mb-2"
+                >
+                  Default shell
+                </label>
+                {shellsLoading ? (
+                  <Skeleton className="w-full h-10" />
+                ) : (
+                  <div className="relative">
+                    <select
+                      id="project-default-shell"
+                      value={shell}
+                      onChange={(e) => {
+                        setShell(e.target.value)
+                        setHasChanges(true)
+                      }}
+                      className={cn(
+                        PANEL_FIELD_CLASS,
+                        'w-full cursor-pointer appearance-none rounded-md py-2 pl-3 pr-10 text-sm'
+                      )}
+                    >
+                      {availableShells?.available && availableShells.available.length > 0 ? (
+                        availableShells.available.map((s) => (
+                          <option key={s.name} value={s.name}>
+                            {s.displayName}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">No shells detected</option>
+                      )}
+                    </select>
+                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground">
+                      <ChevronDown size={14} />
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             </div>
           </SettingsSection>
 
           {/* Worktree Symlink Directories Section */}
           <SettingsSection id="symlinks">
-            <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-              <div className="w-full pt-1 md:w-1/3">
-                <h2 className="text-lg font-medium text-foreground">Worktree Symlinks</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Directories to symlink from the project root into worktrees. This allows shared
-                  dependencies (like{' '}
-                  <code className="text-xs bg-secondary/50 px-1 rounded">node_modules</code>) across
-                  worktrees without reinstalling.
-                </p>
-                <div className="mt-4 space-y-2">
-                  <button
-                    onClick={() => void syncFromGitignore()}
-                    disabled={symlinkLoading || !activeProject?.isGitRepo}
-                    className="text-xs flex items-center text-primary hover:text-primary/80 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {symlinkLoading ? (
-                      <Spinner size={14} decorative className="mr-1" />
-                    ) : (
-                      <RefreshCw size={14} className="mr-1" />
-                    )}
-                    Sync from .gitignore
-                  </button>
-                  <button
-                    onClick={addSymlinkDir}
-                    className="text-xs flex items-center text-primary hover:text-primary/80 font-medium transition-colors"
-                  >
-                    <Plus size={14} className="mr-1" /> Add Directory
-                  </button>
-                </div>
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => void syncFromGitignore()}
+                  disabled={symlinkLoading || !activeProject?.isGitRepo}
+                >
+                  {symlinkLoading ? <Spinner size={13} decorative /> : <RefreshCw size={13} />}
+                  Sync from .gitignore
+                </Button>
+                <Button type="button" size="xs" variant="outline" onClick={addSymlinkDir}>
+                  <Plus size={13} /> Add directory
+                </Button>
               </div>
-              <div className="w-full md:w-2/3">
-                <div className="bg-secondary/30 rounded-lg border border-border p-3 space-y-2">
-                  {symlinkDirs.length === 0 ? (
-                    <p className="text-xs text-muted-foreground text-center py-4">
-                      No symlink directories configured. Click "Sync from .gitignore" to
-                      auto-detect.
-                    </p>
-                  ) : (
-                    symlinkDirs.map((dir, index) => (
-                      <div key={index} className="flex items-center gap-2">
-                        <Link2 size={12} className="text-muted-foreground flex-shrink-0" />
-                        <input
-                          type="text"
-                          value={dir}
-                          onChange={(e) => updateSymlinkDir(index, e.target.value)}
-                          placeholder="e.g. node_modules"
-                          className={cn(
-                            PANEL_FIELD_CLASS,
-                            'flex-1 rounded px-2 py-1 font-mono text-sm'
-                          )}
-                        />
-                        <button
-                          onClick={() => removeSymlinkDir(index)}
-                          className="text-muted-foreground hover:text-destructive p-1 rounded transition-colors"
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
+              <div className="bg-secondary/30 rounded-lg border border-border p-3 space-y-2">
+                {symlinkDirs.length === 0 ? (
+                  <p className="text-xs text-muted-foreground text-center py-4">
+                    No symlink directories configured. Click "Sync from .gitignore" to auto-detect.
+                  </p>
+                ) : (
+                  symlinkDirs.map((dir, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <Link2 size={12} className="text-muted-foreground flex-shrink-0" />
+                      <input
+                        type="text"
+                        value={dir}
+                        onChange={(e) => updateSymlinkDir(index, e.target.value)}
+                        placeholder="e.g. node_modules"
+                        className={cn(
+                          PANEL_FIELD_CLASS,
+                          'flex-1 rounded px-2 py-1 font-mono text-sm'
+                        )}
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Remove ${dir || 'directory'}`}
+                        onClick={() => removeSymlinkDir(index)}
+                        className="text-muted-foreground hover:text-destructive p-1 rounded transition-colors"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </SettingsSection>
 
           {/* Provider Section */}
           <SettingsSection id="provider">
-            <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-              <div className="w-full pt-1 md:w-1/3">
-                <h2 className="text-lg font-medium text-foreground">Provider</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Choose the account that this project&apos;s agent chats use.
-                </p>
-              </div>
-              <div className="w-full md:w-2/3">
-                <ProjectProviderSettings
-                  claude={claudeAccountDraft}
-                  onChange={() => setHasChanges(true)}
-                  onManageAccounts={() => {
-                    if (hasChanges) {
-                      toast.warning('Save or discard your changes first.')
-                      return
-                    }
-                    openAppSettings()
-                  }}
-                />
-              </div>
+            <div className="flex flex-col gap-4">
+              <ProjectProviderSettings
+                claude={claudeAccountDraft}
+                onChange={() => setHasChanges(true)}
+                onManageAccounts={() => {
+                  if (hasChanges) {
+                    toast.warning('Save or discard your changes first.')
+                    return
+                  }
+                  openAppSettings('provider')
+                }}
+              />
             </div>
           </SettingsSection>
 
           {/* Emergency Mode & Expert Workflows Section */}
           <SettingsSection id="emergency">
-            <div className="flex flex-col items-start gap-6 md:flex-row">
-              <div className="w-full pt-1 md:w-1/3">
-                <h2 className="text-lg font-medium text-foreground">Emergency Mode</h2>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Power-user workflow settings for incident response and rapid worktree operations.
-                </p>
-              </div>
-              <div className="w-full md:w-2/3">
-                <div className="bg-secondary/30 rounded-lg border border-border p-4 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">
-                        Skip Confirmation Dialogs
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Bypass non-essential prompts during worktree operations.
-                      </p>
-                    </div>
-                    <Switch
-                      aria-label="Skip Confirmation Dialogs"
-                      checked={skipConfirmations}
-                      onCheckedChange={setSkipConfirmations}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">
-                        Skip .gitignore Selection
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Use default symlink settings when creating worktrees.
-                      </p>
-                    </div>
-                    <Switch
-                      aria-label="Skip .gitignore Selection"
-                      checked={skipGitignoreSelection}
-                      onCheckedChange={setSkipGitignoreSelection}
-                    />
-                  </div>
+            <div className="flex flex-col gap-4">
+              <div className="bg-secondary/30 rounded-lg border border-border p-4 space-y-4">
+                <div className="flex items-center justify-between">
                   <div>
-                    <label className="block text-sm font-medium text-foreground mb-1">
-                      Default Branch Prefix
-                    </label>
-                    <input
-                      type="text"
-                      value={defaultBranchPrefix}
-                      onChange={(e) => {
-                        setDefaultBranchPrefix(e.target.value)
-                      }}
-                      placeholder="feature/"
-                      className={cn(
-                        PANEL_FIELD_CLASS,
-                        'w-full rounded-md px-3 py-2 font-mono text-sm'
-                      )}
-                    />
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Prefix for new branch naming (e.g. "feature/", "hotfix/").
+                    <p className="text-sm font-medium text-foreground">Skip Confirmation Dialogs</p>
+                    <p className="text-xs text-muted-foreground">
+                      Bypass non-essential prompts during worktree operations.
                     </p>
                   </div>
+                  <Switch
+                    aria-label="Skip Confirmation Dialogs"
+                    checked={skipConfirmations}
+                    onCheckedChange={setSkipConfirmations}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">Skip .gitignore Selection</p>
+                    <p className="text-xs text-muted-foreground">
+                      Use default symlink settings when creating worktrees.
+                    </p>
+                  </div>
+                  <Switch
+                    aria-label="Skip .gitignore Selection"
+                    checked={skipGitignoreSelection}
+                    onCheckedChange={setSkipGitignoreSelection}
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="project-branch-prefix"
+                    className="block text-sm font-medium text-foreground mb-1"
+                  >
+                    Default branch prefix
+                  </label>
+                  <input
+                    id="project-branch-prefix"
+                    type="text"
+                    value={defaultBranchPrefix}
+                    onChange={(e) => {
+                      setDefaultBranchPrefix(e.target.value)
+                    }}
+                    placeholder="feature/"
+                    className={cn(
+                      PANEL_FIELD_CLASS,
+                      'w-full rounded-md px-3 py-2 font-mono text-sm'
+                    )}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Prefix for new branch naming (e.g. "feature/", "hotfix/").
+                  </p>
                 </div>
               </div>
             </div>

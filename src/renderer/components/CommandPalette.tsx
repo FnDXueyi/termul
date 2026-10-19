@@ -32,8 +32,10 @@ import { usePinnedCommandIds, useTogglePinnedCommand } from '@/hooks/use-pinned-
 import { useRecentCommandIds, useSaveRecentCommand } from '@/hooks/use-recent-commands'
 import { getColorClasses } from '@/lib/colors'
 import { isTauriContext } from '@/lib/tauri-runtime'
+import { terminalProfileCommandLine } from '@/lib/terminal-profiles'
 import { cn } from '@/lib/utils'
 import type { Project, ProjectColor } from '@/types/project'
+import type { TerminalProfile } from '@/types/settings'
 
 type CommandShortcutId = 'newTerminal' | 'newBrowserTab' | 'commandHistory' | 'colorThemePicker'
 
@@ -43,12 +45,14 @@ interface CommandPaletteProps {
   projects: Project[]
   onSwitchProject: (id: string) => void
   onAddTerminal?: () => void
+  terminalProfiles?: TerminalProfile[]
+  onOpenTerminalProfile?: (profile: TerminalProfile) => void
   onShowAgentLauncher?: () => void
   onLaunchAgent?: () => void
   onSaveSnapshot?: () => void
   onNewBrowserTab?: () => void
-  /** OpenPencil canvas mode: opens the active project's `.op` document as
-   * the canvas tab. Hidden on the mobile web shell (no canvas on phones). */
+  /** Opens the active project's `.figcraft` document as the canvas tab.
+   * Hidden on the mobile web shell (no canvas on phones). */
   onOpenCanvas?: () => void
   /** Story 7: opens the New Project modal (mobile creation entry + desktop). */
   onNewProject?: () => void
@@ -106,6 +110,8 @@ export function CommandPalette({
   projects,
   onSwitchProject,
   onAddTerminal,
+  terminalProfiles,
+  onOpenTerminalProfile,
   onShowAgentLauncher,
   onLaunchAgent,
   onSaveSnapshot,
@@ -147,6 +153,17 @@ export function CommandPalette({
               execute: onAddTerminal
             }
           ]
+        : []),
+      ...(onOpenTerminalProfile && terminalProfiles
+        ? terminalProfiles.map((profile) => ({
+            id: `terminal-profile-${profile.id}`,
+            category: 'workspace' as const,
+            icon: <Terminal aria-hidden="true" size={16} />,
+            label: `New Terminal: ${profile.name}`,
+            description: terminalProfileCommandLine(profile),
+            keywords: ['profile', 'shell', 'terminal', profile.name, profile.shell],
+            execute: () => onOpenTerminalProfile(profile)
+          }))
         : []),
       ...(onNewProject
         ? [
@@ -225,8 +242,8 @@ export function CommandPalette({
               category: 'workspace' as const,
               icon: <Edit2 aria-hidden="true" size={16} />,
               label: 'Open Canvas',
-              description: "Open the project's .op design document as a canvas tab",
-              keywords: ['canvas', 'openpencil', 'design', 'op', 'drawing', 'vector'],
+              description: "Open the project's .figcraft design document as a canvas tab",
+              keywords: ['canvas', 'figcraft', 'design', 'drawing', 'vector'],
               execute: onOpenCanvas
             }
           ]
@@ -343,6 +360,8 @@ export function CommandPalette({
       projects,
       onSwitchProject,
       onAddTerminal,
+      terminalProfiles,
+      onOpenTerminalProfile,
       onShowAgentLauncher,
       onLaunchAgent,
       onSaveSnapshot,
@@ -538,7 +557,7 @@ export function CommandPalette({
             onClick={(e) => e.stopPropagation()}
           >
             <Command
-              className="[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-2xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
+              className="[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground"
               shouldFilter={true}
             >
               <div className="relative">

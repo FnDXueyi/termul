@@ -202,7 +202,7 @@ async fn a_reloaded_renderer_reattaches_the_live_pty_and_replays_its_output() {
     let dead_page = spawn_live_terminal(&pty).await;
     let terminal_id = dead_page.info.id.clone();
 
-    let listed = list_preserved_reply(&pty, "p");
+    let listed = list_preserved_reply(&pty, "p", None);
     assert!(listed.success);
     let listed = listed.data.expect("preserved terminals");
     assert_eq!(listed.len(), 1);
@@ -239,14 +239,14 @@ async fn a_reloaded_renderer_reattaches_the_live_pty_and_replays_its_output() {
 async fn another_clients_listing_does_not_sever_a_desktop_attach_stream() {
     let pty = crate::web::test_pty_manager();
     let terminal_id = spawn_live_terminal(&pty).await.info.id;
-    let desktop_claim = list_preserved_reply(&pty, "p").data.expect("list")[0]
+    let desktop_claim = list_preserved_reply(&pty, "p", None).data.expect("list")[0]
         .claim
         .clone()
         .expect("fresh claim");
     let (channel, received) = collecting_channel();
     assert!(attach_terminal(&pty, terminal_id.clone(), &desktop_claim, 0, None, channel).success);
 
-    let phone = list_preserved_reply(&pty, "p").data.expect("list");
+    let phone = list_preserved_reply(&pty, "p", None).data.expect("list");
     assert!(phone[0].live_attachment);
     tokio::time::sleep(Duration::from_millis(3 * ATTACH_FORWARDER_GENERATION_CHECK_MS)).await;
     pty.write(&terminal_id, "after\n").await.unwrap();
@@ -258,9 +258,36 @@ async fn another_clients_listing_does_not_sever_a_desktop_attach_stream() {
 }
 
 #[tokio::test]
+async fn a_listing_scoped_to_one_terminal_leaves_its_siblings_claims_valid() {
+    let pty = crate::web::test_pty_manager();
+    let ledger = std::sync::Arc::new(CommandLedger::new(Duration::from_secs(600)));
+    let mut spawned = Vec::new();
+    for command_id in ["spawn-a", "spawn-b"] {
+        let reply = terminal_value_reply(
+            ledgered::spawn(&ledger, &pty, spawn_options(command_id), None).await,
+            ledgered::SPAWN,
+        );
+        spawned.push(reply.data.expect("spawn"));
+    }
+    let (a, b) = (&spawned[0], &spawned[1]);
+
+    let listed = list_preserved_reply(&pty, "p", Some(a.info.id.as_str())).data.expect("list");
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].info.id, a.info.id);
+    let reissued = listed[0].claim.as_deref().expect("fresh claim");
+    assert!(pty.verify_claim(&a.info.id, reissued).is_ok());
+    assert!(pty.verify_claim(&b.info.id, &b.claim).is_ok());
+
+    for terminal in &spawned {
+        pty.force_kill(&terminal.info.id).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn listing_without_a_project_is_a_validation_error() {
     let pty = crate::web::test_pty_manager();
-    let reply = list_preserved_reply(&pty, "");
+    let reply = list_preserved_reply(&pty, "", None);
     assert!(!reply.success);
     assert_eq!(reply.code.as_deref(), Some("VALIDATION_ERROR"));
 }
