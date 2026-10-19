@@ -499,7 +499,7 @@ impl CanvasPersistence {
         let outcome = tokio::select! {
             answered = waiting => match answered {
                 Ok(outcome) => {
-                    if watched {
+                    if watched && answered_by_editor(&outcome) {
                         self.call_answered(project_id, mount_seq);
                     }
                     outcome

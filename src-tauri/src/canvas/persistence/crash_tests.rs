@@ -162,6 +162,30 @@ async fn canvas_hidden_is_an_answer_not_a_timeout() {
 }
 
 #[tokio::test]
+async fn a_reply_the_renderer_gives_for_an_editor_that_never_ran_the_call_keeps_the_count() {
+    for code in [
+        CanvasErrorCode::CanvasTimeout,
+        CanvasErrorCode::CanvasClosed,
+    ] {
+        let mut editor = Editor::mounted(true);
+        editor.time_out().await;
+        editor.time_out().await;
+        editor
+            .answered(Err(CanvasError::new(code, "answered by the renderer")))
+            .await;
+        editor.time_out().await;
+        let notice = tokio::time::timeout(Duration::from_secs(2), editor.remounted_notice())
+            .await
+            .unwrap_or_else(|_| panic!("{code:?} reset the count: no remount"));
+        assert!(
+            notice.reason.contains("3 consecutive calls timed out"),
+            "{code:?}: {}",
+            notice.reason
+        );
+    }
+}
+
+#[tokio::test]
 async fn timeouts_before_the_document_loaded_are_not_a_crash() {
     let mut editor = Editor::mounted(false);
     for _ in 0..4 {
