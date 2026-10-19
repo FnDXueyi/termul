@@ -17,6 +17,10 @@
 function show(text) {
   document.getElementById('result').textContent = 'Result: ' + text;
 }
+if (location.search === '?alert-on-load') {
+  alert('Load alert');
+  show('load alert closed');
+}
 document.getElementById('alert').addEventListener('click', function () {
   alert('Fixture alert');
   show('alert closed');

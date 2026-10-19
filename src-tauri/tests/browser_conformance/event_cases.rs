@@ -171,6 +171,28 @@ pub async fn dialog_beforeunload(c: &Ctx<'_>) -> CaseResult {
     c.expect_url("/form.html", "the guarded navigation").await
 }
 
+/// A dialog the tab's first page raises while it loads reaches the host,
+/// which accepts an alert at once.
+pub async fn dialog_on_load(c: &Ctx<'_>) -> CaseResult {
+    let reply = c.navigate("/dialogs.html?alert-on-load").await?;
+    let waited = c
+        .call("wait", json!({ "text": "Result: load alert closed" }))
+        .await?;
+    let after = c.call("snapshot", json!({})).await?;
+    let reported = [&reply, &waited, &after].iter().any(|r| {
+        r["page"]["dialog"]["kind"] == "alert"
+            && r["page"]["dialog"]["message"] == "Load alert"
+            && r["page"]["dialog"]["state"] == "accepted"
+    });
+    if reported {
+        Ok(())
+    } else {
+        Err(mismatch(format!(
+            "the alert of the first page load was never reported: {reply} then {waited} then {after}"
+        )))
+    }
+}
+
 pub async fn popup(c: &Ctx<'_>) -> CaseResult {
     c.open("/popup.html", POPUP_READY).await?;
     let opener = c.tab().await?;
