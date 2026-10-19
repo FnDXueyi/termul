@@ -161,6 +161,19 @@ describe('unmountCanvasesFor', () => {
     addCanvasTab.mockRestore()
   })
 
+  it('leaves a canvas the user opened meanwhile in place', async () => {
+    close.mockResolvedValue(UNMOUNTED)
+    const remount = await unmountCanvasesFor(['a'])
+    const newer = { ...session('a'), docPath: 'C:/a/poster.figcraft' }
+    useCanvasStore.setState({ sessions: { ...useCanvasStore.getState().sessions, a: newer } })
+
+    remount?.()
+    await Promise.resolve()
+    expect(useCanvasStore.getState().sessions.a).toEqual(newer)
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(open).not.toHaveBeenCalled()
+  })
+
   it('is null when the user keeps editing', async () => {
     close.mockResolvedValue(SAVE_FAILED)
     const done = unmountCanvasesFor(['a'])
