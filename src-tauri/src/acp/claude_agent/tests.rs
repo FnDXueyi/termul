@@ -292,8 +292,7 @@ fn auth_mode_defaults_to_claude_code_and_status_never_contains_the_key() {
 fn without_host_state_uses_default_mode() {
     let store: Arc<dyn ClaudeCredentialStore> = Arc::new(InMemoryClaudeCredentialStore::default());
     store.set(AUTH_MODE_ACCOUNT, "api-key").unwrap();
-    let service =
-        ClaudeAgentService::with_adapters(store, None, Arc::new(SupportedRuntime));
+    let service = ClaudeAgentService::with_adapters(store, None, Arc::new(SupportedRuntime));
     assert_eq!(service.auth_mode().unwrap(), ClaudeAuthMode::ClaudeCode);
     assert!(service.set_auth_mode(ClaudeAuthMode::ApiKey).is_err());
 }
@@ -598,7 +597,7 @@ async fn api_key_is_injected_only_for_the_managed_claude_install() {
             .prepare_managed_config(&mut managed)
             .await
             .unwrap_err(),
-        "Claude Code CLI is not signed in. Run `claude auth login`, then retry."
+        "ACP_CLAUDE_ACCOUNT_SIGNED_OUT: Claude Code CLI is not signed in. Run `claude auth login`, then retry."
     );
     let cli_store: Arc<dyn ClaudeCredentialStore> =
         Arc::new(InMemoryClaudeCredentialStore::default());

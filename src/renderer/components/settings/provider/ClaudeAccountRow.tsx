@@ -13,14 +13,20 @@ import {
   usageWindowLabel
 } from '@/lib/claude-usage-format'
 import { cn } from '@/lib/utils'
-import { accountStatus, PERCENT_TEXT, StatusDot, UsageBar } from './account-status'
+import {
+  accountReadiness,
+  accountStatus,
+  PERCENT_TEXT,
+  StatusDot,
+  UsageBar
+} from './account-status'
 
 /** Whether a row should read as signed out (the CLI probe or the usage read). */
 export function isAccountSignedOut(
   account: ClaudeAccountView,
   usage: ClaudeAccountUsage | undefined
 ): boolean {
-  return account.signedIn === false || usage?.status === 'signed_out'
+  return accountReadiness(account, usage) === 'signed-out'
 }
 
 export function AccountAvatar({ name }: { name: string }): React.JSX.Element {

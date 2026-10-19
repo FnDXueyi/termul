@@ -4,6 +4,7 @@ import { AttachFilesButton } from '@/components/chat/AttachFilesButton'
 import { AgentModelSelector } from '@/components/chat/agent-model-selector/AgentModelSelector'
 import type { SelectorSource } from '@/components/chat/agent-model-selector/selector-source'
 import type { ComposerToolbarMode } from '@/components/chat/chat-layout'
+import { ProjectClaudeAccountChip } from '@/components/chat/claude-account/ClaudeAccountChip'
 import { McpBadge } from '@/components/chat/McpBadge'
 import { ArrowUp } from '@/components/icons'
 import { Button } from '@/components/ui/button'
@@ -14,12 +15,15 @@ import type { RegistryAgent } from '@/lib/agents/acp-registry'
 import type { SupportedAcpAgentEntry } from '@/lib/agents/supported-acp-agents'
 import { cn } from '@/lib/utils'
 import { type AcpSession, useAcpStore } from '@/stores/acp-store'
+import { CLAUDE_AGENT_CONFIG_ID } from '@/stores/claude-account-switch'
 import { AgentUpdateCta } from './AgentUpdateCta'
 
 /**
- * The composer card's bottom row: attachments + MCP badge on the left; the
- * update CTA, the agent/model selector (agent, model, effort, Fast, agent
- * options), the mode chip, and the launch button on the right.
+ * The composer card's bottom row: attachments + MCP badge (+ the Claude
+ * account chip) on the left; the update CTA, the agent/model selector (agent,
+ * model, effort, Fast, agent options), the mode chip, and the launch button on
+ * the right. On the phone shell the account chip sits compact before the
+ * launch button, where the chat composer has it.
  */
 export function LauncherToolbar({
   pickFiles,
@@ -109,6 +113,10 @@ export function LauncherToolbar({
    */
   onSelectorCloseAutoFocus?: (event: Event) => void
 }): React.JSX.Element {
+  const accountChip =
+    selectedEntry?.configId === CLAUDE_AGENT_CONFIG_ID && activeProjectId ? (
+      <ProjectClaudeAccountChip projectId={activeProjectId} compact={isMobileShell} />
+    ) : null
   return (
     <div
       className="flex items-center justify-between gap-3 px-2 pb-2"
@@ -142,6 +150,7 @@ export function LauncherToolbar({
             void loadMcpTools(id)
           }}
         />
+        {!isMobileShell && accountChip}
       </div>
       <div
         className={cn(
@@ -219,6 +228,7 @@ export function LauncherToolbar({
             </div>
           )
         })()}
+        {isMobileShell && accountChip}
         <Button
           type="button"
           variant="composer"

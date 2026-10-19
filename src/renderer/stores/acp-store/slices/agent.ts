@@ -30,6 +30,7 @@ import {
   browserTabId as workspaceBrowserTabId
 } from '@/stores/workspace-store'
 import { isDetachedReuseKey, parseReuseKey } from '../../acp-reuse-keys'
+import { stoppingAgentIds } from '../ephemeral-ids'
 import {
   authPickerUnavailableError,
   configIdForAgentId,
@@ -638,7 +639,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
   },
 
   killAgent: async (agentId) => {
-    await acpApi.killAgent(agentId)
+    stoppingAgentIds.add(agentId)
+    try {
+      await acpApi.killAgent(agentId)
+    } finally {
+      stoppingAgentIds.delete(agentId)
+    }
     // Drop cached auth for the torn-down process so a re-spawn re-authenticates
     // (the new subprocess has unknown auth state; a stale `authenticatedAgents`
     // entry would make `authenticateBeforeSession` skip `authenticate`).
