@@ -124,7 +124,7 @@ worker () {
       --thinking max \
       --auto-approve \
       --no-session \
-      --max-time 3000 \
+      --max-time 4800 \
       --cwd "$wt" \
       --append-system-prompt "$(worker_prompt "$n")" \
       "Claim one issue and deliver one PR. Follow your instructions exactly." \
