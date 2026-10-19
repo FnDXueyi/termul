@@ -251,6 +251,18 @@ describe('createCanvasBridge', () => {
     }
   })
 
+  it('answers calls posted to a page that then reloaded with CANVAS_CLOSED', async () => {
+    editor.ready()
+    const lost = bridge.call('host.snapshot')
+    editor.ready()
+    await expect(lost).resolves.toEqual({
+      ok: false,
+      error: { code: 'CANVAS_CLOSED', message: expect.any(String) }
+    })
+    void bridge.call('document.inspect')
+    expect(editor.lastRequest().method).toBe('document.inspect')
+  })
+
   it('resolves pending and later calls with CANVAS_CLOSED once disposed', async () => {
     const queued = bridge.call('document.inspect')
     editor.ready()

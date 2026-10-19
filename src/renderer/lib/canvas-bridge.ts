@@ -251,6 +251,13 @@ export function createCanvasBridge(options: CanvasBridgeOptions): CanvasBridge {
     if (typeof data.method !== 'string') return
     const parsed = parseEvent(data.method, data.params)
     if (parsed === null) return
+    if (parsed.method === 'event.ready' && ready) {
+      // The page reloaded: what was posted to the old one gets no answer.
+      for (const resolve of pending.values()) {
+        resolve(bridgeFailure('CANVAS_CLOSED', 'the editor reloaded'))
+      }
+      pending.clear()
+    }
     if (parsed.method === 'event.ready' && !ready) {
       ready = true
       const now = Date.now()

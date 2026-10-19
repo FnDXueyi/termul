@@ -517,6 +517,33 @@ describe('mount and load', () => {
     expect(currentMount().mountSeq).toBe(41)
   })
 
+  it('a second event.ready on a ready mount reloads the last save before anything else', async () => {
+    const editor = await mountReady()
+    readDocument.mockResolvedValueOnce(ok({ bytes: 'c2F2ZWQ=' }))
+    documentLoaded.mockResolvedValueOnce(ok(view({ contentVersion: '1', savedVersion: '1' })))
+    editor.ready()
+    expect(session()?.phase.kind).toBe('loading')
+
+    editor.dirty(true, '2')
+    expect(dirtyChanged).not.toHaveBeenCalled()
+    editor.reply('host.describe', JSON.stringify({ tag: PIN, engineVersion: '0.6.0' }))
+    await flush()
+    expect(readDocument).toHaveBeenCalledTimes(2)
+    expect(editor.sent('host.openDocument').at(-1)?.params).toBe('{"bytes":"c2F2ZWQ="}')
+    editor.reply('host.openDocument', '{"contentVersion":1}')
+    await flush()
+
+    expect(documentLoaded).toHaveBeenLastCalledWith(PROJECT, 41, '{"contentVersion":1}')
+    expect(session()).toMatchObject({
+      phase: { kind: 'ready' },
+      contentVersion: '1',
+      savedVersion: '1'
+    })
+    expect(editor.sent('host.theme')).toHaveLength(2)
+    expect(editor.sent('host.locale')).toHaveLength(2)
+    expect(writeSnapshot).not.toHaveBeenCalled()
+  })
+
   it('a pin mismatch is only logged in dev builds', async () => {
     vi.stubEnv('PROD', false)
     readDocument.mockResolvedValueOnce(ok({ bytes: null }))

@@ -442,7 +442,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     const outcome = result.data
     if (outcome.kind === 'superseded') return
     patchSession(projectId, projectionOf(outcome.view))
-    if (outcome.kind === 'saveDue') await runSave(projectId, mountSeq)
+    // A frame that reloaded itself holds no edits until its document is back.
+    if (outcome.kind === 'saveDue' && get().sessions[projectId]?.phase.kind === 'ready') {
+      await runSave(projectId, mountSeq)
+    }
   }
 
   /** The disk change the host raised as a conflict: shown once. */
@@ -716,6 +719,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       switch (event.method) {
         case 'event.ready':
           if (session?.phase.kind === 'loading') void completeMount(projectId, session.phase.mount)
+          if (session?.phase.kind === 'ready') {
+            // The frame reloaded itself and shows an empty editor: nothing is
+            // saved until the last save is loaded into it again.
+            logCanvas('warn', 'ready', `canvas frame reloaded for project ${projectId}`)
+            patchSession(projectId, { phase: { kind: 'loading', mount: session.phase.mount } })
+            void completeMount(projectId, session.phase.mount)
+          }
           return
         case 'event.dirtyChanged':
           // AD-31: dirty state starts once the document is loaded.
