@@ -308,25 +308,15 @@ fn describe_frame_is_served_before_the_session_is_bound() {
 
 // -- spec-acp-browser-automation-v2 CAP-6: boundary failure logs -----------
 
-/// Global `log` capture for the CAP-6 boundary-log test: filters on the
-/// production boundary-failure prefix (shared const — never a drifted
-/// copy) so unrelated records from concurrently running tests are
-/// ignored.
-struct CapturingLogger {
-    lines: std::sync::Arc<StdMutex<Vec<String>>>,
-}
-
-impl log::Log for CapturingLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::Level::Warn
-    }
-    fn log(&self, record: &log::Record) {
-        let line = format!("{}", record.args());
-        if line.contains(crate::browser_automation::BROWSER_CALL_FAILED_PREFIX) {
-            self.lines.lock().unwrap().push(line);
-        }
-    }
-    fn flush(&self) {}
+/// The boundary-failure lines logged so far in this process, from the shared
+/// global `log` capture, each starting at the production prefix (shared
+/// const, never a drifted copy) so unrelated records are ignored.
+fn boundary_failure_lines() -> Vec<String> {
+    let prefix = crate::browser_automation::BROWSER_CALL_FAILED_PREFIX;
+    crate::web::log_capture::logged_lines()
+        .into_iter()
+        .filter_map(|line| line.find(prefix).map(|at| line[at..].to_string()))
+        .collect()
 }
 
 #[test]
@@ -340,20 +330,7 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
     // (CWE-532). The agent-facing reply keeps the full message (values
     // allowed there — it is the tool result, not a log).
     const SECRET_URL: &str = "https://cap6-secret.example/a?token=hunter2";
-    // The only `set_boxed_logger` call in the test binary — the logger
-    // stays installed for the process (harmless: it only filters+records
-    // the boundary prefix). The max level is saved and restored so later
-    // tests keep their own logging behavior.
-    let captured: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-    assert!(
-        log::set_boxed_logger(Box::new(CapturingLogger {
-            lines: captured.clone()
-        }))
-        .is_ok(),
-        "no other test may install a global logger"
-    );
-    let prev_max_level = log::max_level();
-    log::set_max_level(log::LevelFilter::Warn);
+    let _ = boundary_failure_lines();
 
     // Serialize on the shared host lock — the test flips the registered
     // host (none → stub).
@@ -483,7 +460,7 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
         format!("{} [confirmation_required] action=hover arg_keys=[ref, tabId] agent=agent-1 session=cap6-end…", crate::browser_automation::BROWSER_CALL_FAILED_PREFIX),
     ];
     {
-        let lines = captured.lock().unwrap();
+        let lines = boundary_failure_lines();
         for want in expected {
             assert!(
                 lines.iter().any(|l| l == &want),
@@ -547,9 +524,6 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
         assert_eq!(by_action("screenshot")["code"], "internal");
         assert_eq!(by_action("hover")["code"], "confirmation_required");
     }
-
-    // Restore the process log level for the tests that follow.
-    log::set_max_level(prev_max_level);
 }
 
 #[test]

@@ -2356,6 +2356,11 @@ describe('switchAgent (story 3)', () => {
       const sendPrompt = vi.fn(async () => 'end_turn')
       _setAcpTransportForTests({
         historyMode: () => 'server',
+        // A chat never reopens on the agent that hosts the armed switch's warm session.
+        spawnAgent: vi.fn(async () => ({
+          agentId: `${agentId}-own`,
+          capabilities: { loadSession: true }
+        })),
         loadSession: vi.fn(async () => ({})),
         recordAgentSwitch: vi.fn(async () => {}),
         sendPrompt,

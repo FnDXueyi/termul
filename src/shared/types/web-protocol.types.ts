@@ -259,7 +259,18 @@ export const WS_REQUEST_TYPES = [
   // on the host (a forced read still reuses one younger than 60 s).
   'list_claude_usage',
   'set_default_claude_account',
-  'set_project_claude_account'
+  'set_project_claude_account',
+  // The canvas gateway's renderer leg (spine AD-21, AD-29). `canvas_mount`
+  // / `canvas_unmount` `{ projectId, mountSeq }` tell the host this connection
+  // holds (or no longer holds) a project's canvas; the host then forwards
+  // agent canvas calls to it as top-level `canvas_call` frames, answered with
+  // `canvas_reply { callId, mountSeq, ok, result | error }`. `params` and
+  // `result` are JSON text, never parsed on the way. Replies `{}`,
+  // `{ unmounted }` and `{ resolved }`. A long `result` goes in several
+  // `canvas_reply`, each `partial: true` but the last, answered `{ accepted }`.
+  'canvas_mount',
+  'canvas_unmount',
+  'canvas_reply'
 ] as const
 
 /** Union of all WS request `type` strings. */
@@ -338,7 +349,10 @@ export const WS_COMMAND_CLASSES: Readonly<
   record_agent_switch: ['command', 'payload'],
   mark_chat_read: ['idempotent', null],
   watch: ['read', null],
-  unwatch: ['read', null]
+  unwatch: ['read', null],
+  canvas_mount: ['idempotent', null],
+  canvas_unmount: ['idempotent', null],
+  canvas_reply: ['idempotent', null]
 }
 
 /** Longest accepted `commandId`, in bytes. Mirrors the Rust `MAX_COMMAND_ID_LEN`. */
@@ -612,7 +626,11 @@ export const WS_ERROR_CODES = {
   // for. Never replayed, never executed.
   COMMAND_CONFLICT: 'command_conflict',
   // A request's `commandId` is malformed (not 1-128 chars of [A-Za-z0-9_-]).
-  INVALID_COMMAND_ID: 'invalid_command_id'
+  INVALID_COMMAND_ID: 'invalid_command_id',
+  // The Claude Account a request needs is not signed in: choosing it for a
+  // Project or as the default (nothing changed), or starting a managed Claude
+  // agent on it. The message names the Account and where to sign in.
+  CLAUDE_ACCOUNT_SIGNED_OUT: 'claude_account_signed_out'
 } as const
 
 /** Union of all WS error code strings. */
@@ -908,6 +926,55 @@ export interface WsGapFrame {
 export interface WsHeartbeatFrame {
   type: 'heartbeat'
 }
+
+/** `type` of the top-level frame that forwards an agent canvas call (no `seq`). */
+export const WS_CANVAS_CALL_FRAME_TYPE = 'canvas_call'
+
+/** `type` of the top-level frame that says a renderer lost its canvas mount. */
+export const WS_CANVAS_LEASE_LOST_FRAME_TYPE = 'canvas_lease_lost'
+
+/**
+ * Host → the connection that held `projectId`'s canvas at `mountSeq`: this
+ * mount was saved and unmounted because another window or tab opened the
+ * canvas (`takenOver`, spine AD-30) or the mount cap unloaded it (`evicted`,
+ * AD-26).
+ */
+export interface WsCanvasLeaseLostFrame {
+  type: typeof WS_CANVAS_LEASE_LOST_FRAME_TYPE
+  projectId: string
+  mountSeq: number
+  reason: 'takenOver' | 'evicted'
+}
+
+/**
+ * Host → the connection holding `projectId`'s canvas at `mountSeq`: one
+ * figcraft control-protocol call to run in the editor. `params` is JSON text.
+ * Answered with a `canvas_reply` request carrying the same `callId` and
+ * `mountSeq`; the host times the call out, never the renderer.
+ */
+export interface WsCanvasCallFrame {
+  type: typeof WS_CANVAS_CALL_FRAME_TYPE
+  callId: number
+  projectId: string
+  mountSeq: number
+  method: string
+  params: string
+}
+
+/** `canvas_mount` reply. A refused report carries `heldElsewhere`: another
+ * window holds the project's lease; otherwise the host no longer has that
+ * mount (its lease grace ran out). */
+export type WsCanvasMountReply = { attached: true } | { attached: false; heldElsewhere: boolean }
+
+/**
+ * `canvas_reply` payload: the result's JSON text, or a typed error. A result
+ * too long for one message is sent as several, each `partial: true` but the
+ * last, and the host joins them. It answers a partial one `{ accepted }`;
+ * `false` tells the sender to stop.
+ */
+export type WsCanvasReplyPayload =
+  | { callId: number; mountSeq: number; ok: true; result: string; partial?: true }
+  | { callId: number; mountSeq: number; ok: false; error: { code: string; message: string } }
 
 /**
  * `type` of the top-level watch frame (no `seq`): the full state of a watch

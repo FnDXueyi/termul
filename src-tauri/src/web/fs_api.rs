@@ -27,8 +27,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 mod precondition;
-pub(crate) use precondition::sha256_hex;
-use precondition::Expected;
+pub(crate) use precondition::Expected;
+pub(crate) use precondition::{sha256_hex, write_checked, write_unchecked, CheckedWrite};
 
 use crate::trackers::git_tracker::GitTracker;
 use crate::web::capabilities::{write_decision, WriteDecision, WriteFlags};
@@ -339,7 +339,7 @@ fn get_extension(name: &str) -> Option<String> {
 ///   search path to exist (it short-circuits on `!exists()`); the fs_api
 ///   routes also create new paths (`mkdir`, `write`), which need a different
 ///   shape that tolerates non-existing targets.
-pub(super) fn resolve_request_path(path: &Path) -> Result<PathBuf, (String, &'static str)> {
+pub(crate) fn resolve_request_path(path: &Path) -> Result<PathBuf, (String, &'static str)> {
     // 1) Reject explicit `..` traversal components. This is a fast, cheap
     //    pre-filter that catches the obvious attack without needing a real
     //    filesystem call. Any `Component::ParentDir` is rejected regardless

@@ -9,7 +9,7 @@ interface CanvasTabInlineProps extends TabInlineProps {
   tab: { type: 'canvas'; id: string; projectId: string; docPath: string }
 }
 
-/** Canvas tab (OpenPencil canvas mode): the dirty dot mirrors the editor's
+/** Canvas tab: the dirty dot mirrors the editor's
  * unsaved marker; the label tracks the bound doc. */
 export function CanvasTabInline({
   tab,

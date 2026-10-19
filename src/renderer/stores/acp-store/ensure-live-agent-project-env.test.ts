@@ -7,7 +7,11 @@ import { seedProjectStore } from '@/lib/test-utils/store'
 import type { Project } from '@/types/project'
 import { agentReuseKey, detachedReuseKey } from '../acp-reuse-keys'
 import { ephemeralSessionIds } from './ephemeral-ids'
-import { _resetDefiniteSpawnRejectionsForTesting, ensureLiveAgent } from './shared-state'
+import {
+  _resetDefiniteSpawnRejectionsForTesting,
+  _resetInFlightPreparedForTesting,
+  ensureLiveAgent
+} from './shared-state'
 import type { AcpState } from './types'
 
 type Config = AcpState['agentConfigs'][number]
@@ -30,6 +34,7 @@ function makeStore(config: Partial<Config> = {}) {
     configToLiveAgent: {} as Record<string, string>,
     agentStatus: {} as Record<string, string>,
     sessions: {} as Record<string, { id: string; agentId: string; status: string }>,
+    preparedSessions: {} as Record<string, string>,
     warmingConfigs: {},
     spawnAgent: vi.fn(),
     killAgent: vi.fn(async () => {})
@@ -202,5 +207,77 @@ describe('ensureLiveAgent — project environment variables (#1118)', () => {
     expect(await ensureLiveAgent(get, set, 'cfg-1', '/work/app')).toBe('agent-host')
     expect(state.spawnAgent).not.toHaveBeenCalled()
     expect(state.killAgent).not.toHaveBeenCalled()
+  })
+})
+
+describe('ensureLiveAgent — one Agent process per chat, warm sessions included', () => {
+  beforeEach(() => {
+    _resetDefiniteSpawnRejectionsForTesting()
+    _resetInFlightPreparedForTesting()
+    seedProjectStore([project()])
+  })
+
+  it('gives a chat its own agent while a warm prepare spawns one for the same project', async () => {
+    const { state, get, set } = makeStore()
+    let finishWarm!: (id: string) => void
+    state.spawnAgent
+      .mockImplementationOnce(() => new Promise((resolve) => (finishWarm = resolve)))
+      .mockResolvedValueOnce('agent-chat')
+
+    const warm = ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'warm' })
+    const chat = ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'chat' })
+    finishWarm('agent-warm')
+
+    expect(await warm).toBe('agent-warm')
+    expect(await chat).toBe('agent-chat')
+  })
+
+  it('gives a warm prepare its own agent while a chat spawns one for the same project', async () => {
+    const { state, get, set } = makeStore()
+    let finishChat!: (id: string) => void
+    state.spawnAgent
+      .mockImplementationOnce(() => new Promise((resolve) => (finishChat = resolve)))
+      .mockResolvedValueOnce('agent-warm')
+
+    const chat = ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'chat' })
+    const warm = ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'warm' })
+    finishChat('agent-chat')
+
+    expect(await chat).toBe('agent-chat')
+    expect(await warm).toBe('agent-warm')
+  })
+
+  it('does not reopen a chat on the agent that hosts the warm session', async () => {
+    const { state, get, set } = makeStore()
+    state.spawnAgent.mockResolvedValueOnce('agent-warm').mockResolvedValueOnce('agent-chat')
+    expect(await ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'warm' })).toBe(
+      'agent-warm'
+    )
+    state.agentStatus['agent-warm'] = 'connected'
+    state.sessions.warm = { id: 'warm', agentId: 'agent-warm', status: 'active' }
+    ephemeralSessionIds.add('warm')
+    state.preparedSessions['cfg-1\0/work/app\0'] = 'warm'
+    try {
+      // A commit message may share the warm agent; a chat may not.
+      expect(await ensureLiveAgent(get, set, 'cfg-1', '/work/app')).toBe('agent-warm')
+      expect(await ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'chat' })).toBe(
+        'agent-chat'
+      )
+      expect(state.spawnAgent).toHaveBeenCalledTimes(2)
+    } finally {
+      ephemeralSessionIds.delete('warm')
+    }
+  })
+
+  it('does not warm a session on an agent just handed to a chat', async () => {
+    const { state, get, set } = makeStore()
+    state.spawnAgent.mockResolvedValueOnce('agent-chat').mockResolvedValueOnce('agent-warm')
+    expect(await ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'chat' })).toBe(
+      'agent-chat'
+    )
+    state.agentStatus['agent-chat'] = 'connected'
+    expect(await ensureLiveAgent(get, set, 'cfg-1', '/work/app', { holder: 'warm' })).toBe(
+      'agent-warm'
+    )
   })
 })

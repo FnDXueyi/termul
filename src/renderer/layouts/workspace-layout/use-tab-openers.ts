@@ -58,17 +58,17 @@ export function useTabOpeners({
 }: UseTabOpenersOptions) {
   const appDefaultShell = useDefaultShell()
 
-  // OpenPencil canvas mode (CAP-1): the palette command resolves the
-  // project's `.op` document (first one in the project root, via the pure
-  // pickCanvasDoc helper) and opens it as the singleton canvas tab. The
-  // palette hides the command on the mobile shell; the canvas facade gates
-  // direct calls with a typed UNSUPPORTED_SURFACE failure.
+  // The palette command resolves the project's `.figcraft` document (first
+  // one in the project root, via the pure pickCanvasDoc helper) and opens it
+  // as the singleton canvas tab. The palette hides the command on the mobile
+  // shell; the canvas facade gates direct calls with a typed
+  // UNSUPPORTED_SURFACE failure.
   const handleOpenCanvas = useCallback(() => {
     setIsCommandPaletteOpen(false)
     if (!activeProjectId) return
     const projectPath = activeProject?.path
     if (!projectPath) {
-      toast.error('The active project has no root folder to search for a .op document.')
+      toast.error('The active project has no root folder to search for a .figcraft document.')
       return
     }
     void openProjectCanvas(activeProjectId, projectPath)

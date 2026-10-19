@@ -16,17 +16,23 @@
 use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::CallToolResult;
-use rmcp::service::serve_server;
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::model::{
+    CallToolResult, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
+    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Tool,
+};
+use rmcp::service::{serve_server, RequestContext};
+use rmcp::{tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use serde::Deserialize;
 
+use crate::acp::host_mcp::canvas_tools;
 use crate::acp::host_mcp::{
-    FrameKind, FrameReply, FrameRequest, TermulAskUserInput, TermulPlanInput, TermulSetTitleInput,
-    ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN, TERMUL_CHAT_INSTRUCTIONS,
+    session_instructions, FrameKind, FrameReply, FrameRequest, TermulAskUserInput,
+    TermulPlanInput, TermulSetTitleInput, ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN,
 };
 
 /// Env-derived configuration for the child. Extracted so the arg parser is
@@ -105,6 +111,8 @@ pub fn run() -> i32 {
 /// `tools/call` can open a fresh TCP connection to the parent.
 struct TermulPlanServer {
     config: ChildConfig,
+    /// The host tools plus figcraft's canvas tools, present from session start
+    /// whether or not a canvas is open, plus the described `browser` tool.
     tool_router: ToolRouter<Self>,
 }
 
@@ -121,6 +129,9 @@ struct DescribedTool {
 impl TermulPlanServer {
     fn new(config: ChildConfig, browser: Option<DescribedTool>) -> Self {
         let mut tool_router = Self::tool_router();
+        for tool in canvas_tools::tools() {
+            tool_router.add_route(canvas_route(tool));
+        }
         if let Some(tool) = browser {
             tool_router.add_route(browser_route(tool));
         }
@@ -198,6 +209,19 @@ fn frame(config: &ChildConfig, kind: FrameKind) -> FrameRequest {
         kind,
         ..FrameRequest::default()
     }
+}
+
+fn canvas_route(tool: Tool) -> ToolRoute<TermulPlanServer> {
+    ToolRoute::new_dyn(tool, |context: ToolCallContext<'_, TermulPlanServer>| {
+        let config = context.service.config.clone();
+        let name = context.name.to_string();
+        let arguments = context.arguments.map_or(Value::Null, Value::Object);
+        Box::pin(async move {
+            Ok(canvas_tools::call_tool(config, name, arguments)
+                .await
+                .into())
+        })
+    })
 }
 
 fn browser_route(tool: DescribedTool) -> ToolRoute<TermulPlanServer> {
@@ -306,19 +330,69 @@ impl TermulPlanServer {
 }
 
 /// `#[tool_handler]` fills `call_tool`/`list_tools`/`get_tool` from the
-/// per-instance router (static tools plus the described `browser` tool)
-/// and skips `get_info` because it is provided here: the returned
-/// `instructions` land in the MCP `initialize` result so agents learn they
-/// can embed images in markdown replies and link files for open-in-editor.
+/// per-instance router (static tools, canvas tools and the described
+/// `browser` tool) and skips `get_info` because it is provided here: the
+/// returned `instructions` land in the MCP `initialize` result so agents
+/// learn they can embed images, link files for open-in-editor, and design
+/// on the canvas. Resources and prompts are figcraft's, answered by
+/// `canvas_tools`.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for TermulPlanServer {
     fn get_info(&self) -> rmcp::model::ServerConfig {
         rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
+                .enable_resources()
+                .enable_prompts()
                 .build(),
         )
-        .with_instructions(TERMUL_CHAT_INSTRUCTIONS.to_string())
+        .with_instructions(session_instructions())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        canvas_tools::request(self.config.clone(), "resources/list", json!({})).await
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        canvas_tools::request(self.config.clone(), "resources/templates/list", json!({})).await
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let params = json!({ "uri": request.uri });
+        canvas_tools::request::<ReadResourceResult>(self.config.clone(), "resources/read", params)
+            .await
+            .map(Into::into)
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        canvas_tools::request(self.config.clone(), "prompts/list", json!({})).await
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, ErrorData> {
+        let params = json!({ "name": request.name, "arguments": request.arguments });
+        canvas_tools::request::<GetPromptResult>(self.config.clone(), "prompts/get", params)
+            .await
+            .map(Into::into)
     }
 }
 

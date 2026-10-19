@@ -567,6 +567,12 @@ impl AcpManager {
     pub fn persistence(&self) -> Option<Arc<SessionPersistence>> {
         self.persistence.clone()
     }
+
+    /// The canvas call router renderers report their mounts and replies to.
+    #[must_use]
+    pub fn canvas_router(&self) -> Arc<crate::acp::host_mcp::canvas::CanvasRouter> {
+        self.host_plan_server.canvas_router()
+    }
     /// Host-authored durable agent-switch marker (CAP-2): the relay numbers,
     /// persists and delivers it through this manager's sinks, then the flush
     /// is the durability boundary. The relay is the only sink on desktop and on
@@ -851,6 +857,7 @@ impl AcpManager {
                 );
                 return Err(with_stderr_tail(reason.to_string(), &stderr_ring));
             }
+            self.host_plan_server.name_agent(&agent_id.0, &config.name);
             agents.insert(
                 agent_id.clone(),
                 AgentEntry {

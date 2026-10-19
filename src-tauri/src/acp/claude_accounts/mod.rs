@@ -28,6 +28,22 @@ const ACCOUNTS_DIR_NAME: &str = "claude-accounts";
 const SCHEMA_VERSION: u32 = 1;
 const MAX_NAME_CHARS: usize = 40;
 
+/// Prefix of an error whose cause is a Claude Account that is not signed in.
+/// `/ws` turns it into the `claude_account_signed_out` code and drops it from
+/// the message; the desktop `invoke` path keeps it for the renderer to map.
+pub const SIGNED_OUT_TAG: &str = "ACP_CLAUDE_ACCOUNT_SIGNED_OUT";
+
+#[must_use]
+pub fn signed_out_error(message: impl std::fmt::Display) -> String {
+    format!("{SIGNED_OUT_TAG}: {message}")
+}
+
+/// The user-facing message of a [`signed_out_error`], or `None` for any other error.
+#[must_use]
+pub fn strip_signed_out_tag(error: &str) -> Option<&str> {
+    error.strip_prefix(SIGNED_OUT_TAG)?.strip_prefix(": ")
+}
+
 /// One Claude subscription login.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -131,6 +131,9 @@ fn title_frame_round_trips_with_kind_and_title() {
         branch: None,
         browser_input: None,
         ask: None,
+        canvas_method: None,
+        canvas_params: None,
+        canvas_tool: None,
     };
     let value = serde_json::to_value(&frame).unwrap();
     assert_eq!(value["kind"], "set_title");
@@ -450,6 +453,9 @@ fn title_frame_carries_the_optional_branch_slug() {
         branch: Some("fix-login".into()),
         browser_input: None,
         ask: None,
+        canvas_method: None,
+        canvas_params: None,
+        canvas_tool: None,
     };
     let value = serde_json::to_value(&frame).unwrap();
     assert_eq!(value["branch"], "fix-login");

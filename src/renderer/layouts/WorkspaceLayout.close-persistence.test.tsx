@@ -341,7 +341,10 @@ vi.mock('@/components/ConfirmDialog', () => ({
 vi.mock('@/lib/api', () => ({
   filesystemApi: {
     watchDirectory: mockWatchDirectory,
-    unwatchDirectory: mockUnwatchDirectory
+    unwatchDirectory: mockUnwatchDirectory,
+    onFileChanged: vi.fn(() => vi.fn()),
+    onFileCreated: vi.fn(() => vi.fn()),
+    onFileDeleted: vi.fn(() => vi.fn())
   },
   windowApi: {
     onCloseRequested: mockCloseRequested,

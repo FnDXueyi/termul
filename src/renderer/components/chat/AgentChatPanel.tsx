@@ -55,6 +55,7 @@ import { CHAT_GUTTER_X } from './chat-layout'
 import { ChatStarters } from './chat-start'
 import { buildTimeline, consolidateThoughtGroups } from './chat-timeline'
 import { ClaudeLimitNotice } from './claude-account/ClaudeLimitNotice'
+import { ClaudeSignInAction } from './claude-account/ClaudeSignInAction'
 import { ElicitationPrompt } from './ElicitationPrompt'
 import { PendingRestartBanner } from './PendingRestartBanner'
 import { PermissionPrompt } from './PermissionPrompt'
@@ -865,6 +866,7 @@ export function AgentChatPanel({
         (hasHistoryEntry || codexSignedOut) && (
           <div className="flex items-center justify-between gap-2 border-b border-warning/30 bg-warning/10 px-3 py-1.5 text-xs text-warning">
             <span>{codexSignedOut ? CODEX_CLI_SIGNED_OUT_MESSAGE : 'This chat stopped.'}</span>
+            {!codexSignedOut && <ClaudeSignInAction sessionId={sessionId} />}
             <button
               type="button"
               onClick={() => {

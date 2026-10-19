@@ -421,6 +421,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [xterm.js](https://github.com/xtermjs/xterm.js) — Terminal rendering
 - [shadcn/ui](https://ui.shadcn.com/) — UI components
 - [Tauri](https://tauri.app/) — Desktop app framework
+- [FigCraft](https://github.com/storytold/figcraft) — Canvas based on FigCraft by the ArtCraft team (MIT OR Apache-2.0)
+- [Inter](https://github.com/rsms/inter) — Font embedded in the canvas, Copyright (c) 2016 The Inter Project Authors, SIL Open Font License 1.1 ([licence](canvas/licenses/OFL-inter.txt))
 
 ---
 

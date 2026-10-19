@@ -1246,7 +1246,7 @@ describe('workspace-store openAgentBrowserTab (spec-acp-browser-automation-v2 CA
   })
 })
 
-describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', () => {
+describe('workspace-store canvas tab singleton (AD-7)', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     useWorkspaceStore.setState(() => {
@@ -1264,10 +1264,10 @@ describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', 
   it('4 repeated addCanvasTab calls for the same project yield exactly one activated tab', () => {
     const store = useWorkspaceStore.getState()
 
-    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
-    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
-    store.addCanvasTab('proj-1', 'C:/demo/poster.op', 'pane-root')
-    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.figcraft', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.figcraft', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/poster.figcraft', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.figcraft', 'pane-root')
 
     const leaf = useWorkspaceStore.getState().root as LeafNode
     const canvasTabs = leaf.tabs.filter((t) => t.type === 'canvas')
@@ -1279,8 +1279,8 @@ describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', 
   it('opening a different doc re-binds the singleton tab docPath in place', () => {
     const store = useWorkspaceStore.getState()
 
-    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
-    store.addCanvasTab('proj-1', 'C:/demo/poster.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.figcraft', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/poster.figcraft', 'pane-root')
 
     const leaf = useWorkspaceStore.getState().root as LeafNode
     const canvasTabs = leaf.tabs.filter((t) => t.type === 'canvas')
@@ -1289,15 +1289,15 @@ describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', 
       type: 'canvas',
       id: 'canvas-proj-1',
       projectId: 'proj-1',
-      docPath: 'C:/demo/poster.op'
+      docPath: 'C:/demo/poster.figcraft'
     })
   })
 
   it('different projects create distinct canvas tabs', () => {
     const store = useWorkspaceStore.getState()
 
-    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
-    store.addCanvasTab('proj-2', 'C:/other/design.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.figcraft', 'pane-root')
+    store.addCanvasTab('proj-2', 'C:/other/design.figcraft', 'pane-root')
 
     const leaf = useWorkspaceStore.getState().root as LeafNode
     const canvasTabs = leaf.tabs.filter((t) => t.type === 'canvas')
@@ -1308,13 +1308,13 @@ describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', 
   it('addCanvasTab reuses a tab living in another pane and activates it there', () => {
     const store = useWorkspaceStore.getState()
 
-    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.figcraft', 'pane-root')
     store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right')
 
     const split = useWorkspaceStore.getState().root as SplitNode
     const rightPaneId = (split.children[1] as LeafNode).id
 
-    store.addCanvasTab('proj-1', 'C:/demo/poster.op', rightPaneId)
+    store.addCanvasTab('proj-1', 'C:/demo/poster.figcraft', rightPaneId)
 
     const leaves = getLeavesFromNode(useWorkspaceStore.getState().root)
     const canvasTabs = leaves.flatMap((leaf) => leaf.tabs.filter((t) => t.type === 'canvas'))
@@ -1328,7 +1328,7 @@ describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', 
 
     // A single-pane layout: the canvas must join THIS pane, not fork a new one
     // (unlike agent browser tabs, which deliberately split ~[33.3, 66.7]).
-    store.addCanvasTab('proj-1', 'C:/demo/design.op')
+    store.addCanvasTab('proj-1', 'C:/demo/design.figcraft')
 
     const state = useWorkspaceStore.getState()
     expect(state.root.type).toBe('leaf')
@@ -1344,7 +1344,7 @@ describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', 
     const beforeCount = before.length
     const activePaneId = useWorkspaceStore.getState().activePaneId
 
-    store.addCanvasTab('proj-2', 'C:/other/design.op')
+    store.addCanvasTab('proj-2', 'C:/other/design.figcraft')
 
     const after = getLeavesFromNode(useWorkspaceStore.getState().root)
     expect(after).toHaveLength(beforeCount)

@@ -31,8 +31,12 @@ use crate::acp::session_persistence::SessionPersistence;
 use crate::web::EventSink;
 
 mod ask;
+mod canvas;
 pub use ask::IdleSignal;
 use ask::PendingAsk;
+
+use crate::acp::host_mcp::canvas::CanvasRouter;
+use crate::acp::host_mcp::presence::Presence;
 
 /// Per-session auth + routing context, keyed by the random token.
 #[derive(Clone)]
@@ -92,6 +96,10 @@ pub struct HostPlanServer {
     idle_signals: Mutex<HashMap<String, IdleSignal>>,
     /// Test seam: replaces the computed `ask_user` heartbeat interval.
     ask_heartbeat_override: Mutex<Option<std::time::Duration>>,
+    /// Routes `Canvas` frames to the renderer holding each project's canvas.
+    canvas: Arc<CanvasRouter>,
+    /// Shows each answered agent canvas call as the session's guest cursor.
+    presence: Arc<Presence>,
 }
 
 impl HostPlanServer {
@@ -107,6 +115,7 @@ impl HostPlanServer {
         sinks: Vec<Arc<dyn EventSink>>,
         persistence: Option<Arc<SessionPersistence>>,
     ) -> Arc<Self> {
+        let canvas = Arc::new(CanvasRouter::default());
         let server = Arc::new(Self {
             port: std::sync::OnceLock::new(),
             sinks,
@@ -119,6 +128,8 @@ impl HostPlanServer {
             branch_attempted_for_session: Mutex::new(HashSet::new()),
             plan_store: PlanStore::new(),
             persistence,
+            presence: Presence::new(Arc::clone(canvas.mounts())),
+            canvas,
         });
         let server_for_thread = Arc::clone(&server);
         let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
@@ -262,6 +273,8 @@ impl HostPlanServer {
                 active_turns.remove(agent_id);
             }
         }
+        drop(active_turns);
+        self.presence.hide(real_session_id);
         log::debug!(
             "[host-mcp] removed active plan route for session {} (agent {})",
             crate::logging::redact_session_id(real_session_id),
@@ -289,6 +302,7 @@ impl HostPlanServer {
             .remove(real_session_id);
         self.plan_store.drop_session(real_session_id);
         self.cancel_asks_for_session(real_session_id);
+        self.presence.hide(real_session_id);
         // Close agent-controlled browser tabs + drop the consent grant. The
         // host no-ops when no browser feature was used by this session.
         crate::browser_automation::session_ended(real_session_id);
@@ -307,6 +321,17 @@ impl HostPlanServer {
         }
     }
 
+    /// `agent_id`'s display name, shown on its sessions' canvas cursors.
+    pub fn name_agent(&self, agent_id: &str, name: &str) {
+        self.presence.name_agent(agent_id, name);
+    }
+
+    /// The canvas router: renderers report mounts and replies to it.
+    #[must_use]
+    pub fn canvas_router(&self) -> Arc<CanvasRouter> {
+        Arc::clone(&self.canvas)
+    }
+
     #[must_use]
     pub fn port(&self) -> u16 {
         *self.port.get().unwrap_or(&0)
@@ -319,12 +344,10 @@ impl HostPlanServer {
     /// connect is sub-ms).
     async fn handle_conn(self: Arc<Self>, stream: tokio::net::TcpStream) -> std::io::Result<()> {
         let (reader, mut writer) = stream.into_split();
-        // Cap the request at 1 MiB so a misbehaving peer can't grow `line`
-        // unbounded. The largest plausible plan (hundreds of todos) is well
-        // under this.
-        const MAX_FRAME: u64 = 1024 * 1024;
+        // The largest plausible plan (hundreds of todos) is well under the
+        // cap; a canvas call over it is refused by the bridge before sending.
         const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        let mut reader = BufReader::new(reader.take(MAX_FRAME));
+        let mut reader = BufReader::new(reader.take(super::MAX_REQUEST_FRAME_BYTES));
 
         let mut line = String::new();
         // Bound the read so an idle peer that connects but never sends is
@@ -509,6 +532,16 @@ impl HostPlanServer {
                 }
             }
             FrameKind::Describe => describe_reply(),
+            FrameKind::Canvas => {
+                self.canvas_call(
+                    &real_session_id,
+                    &auth.agent_id,
+                    req.canvas_tool,
+                    req.canvas_method,
+                    req.canvas_params,
+                )
+                .await
+            }
             FrameKind::AskUser => {
                 let Some(input) = req.ask else {
                     return FrameReply::err("ask_user frame needs a question");
