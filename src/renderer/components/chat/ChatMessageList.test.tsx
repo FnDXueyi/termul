@@ -403,7 +403,7 @@ describe('ChatMessageList', () => {
     )
   })
 
-  it('keeps a failed run expanded when activity moves past it mid-turn', () => {
+  it('folds a failed run once activity moves past it and flags it red', () => {
     render(
       <ChatMessageList
         items={[userItem, failedToolItem, streamingAgentItem]}
@@ -412,12 +412,9 @@ describe('ChatMessageList', () => {
       />
     )
 
-    // A call needing attention keeps its group open one click deep even
-    // though the run is no longer the live edge.
-    expect(screen.getByRole('button', { name: 'Ran 1 command' })).toHaveAttribute(
-      'aria-expanded',
-      'true'
-    )
+    const trigger = screen.getByRole('button', { name: 'Ran 1 command' })
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(trigger).toHaveClass('text-destructive')
   })
 
   it('splits tool calls into per-run groups around an in-turn reply', () => {
@@ -686,12 +683,11 @@ describe('ChatMessageList', () => {
     const trigger = screen.getByRole('button', { name: /Worked.*needs attention/ })
     expect(trigger).toHaveAttribute('aria-expanded', 'false')
 
-    // A failed call stays one click deep: the group opens with the turn row.
     fireEvent.click(trigger)
-    expect(screen.getByRole('button', { name: 'Ran 1 command' })).toHaveAttribute(
-      'aria-expanded',
-      'true'
-    )
+    const run = screen.getByRole('button', { name: 'Ran 1 command' })
+    expect(run).toHaveAttribute('aria-expanded', 'false')
+    expect(run).toHaveClass('text-destructive')
+    fireEvent.click(run)
     expect(screen.getByText('bun run checks')).toBeInTheDocument()
   })
 })

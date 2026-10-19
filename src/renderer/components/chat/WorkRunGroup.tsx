@@ -48,7 +48,10 @@ interface WorkRunGroupProps {
   active: boolean
   /** True while this run owns the turn's last timeline item — its live edge. */
   isLiveTail: boolean
+  /** An unfinished call: the run stays open so it sits one click deep. */
   attentionRequired: boolean
+  /** A failed call: the run still folds, but its trigger reads red. */
+  failed: boolean
   enter: EnterTracker
   filePathContext?: FilePathResolutionContext
   onOpenSubagent: (toolCall: ToolCall) => void
@@ -58,10 +61,10 @@ interface WorkRunGroupProps {
  * One nested disclosure rolling up a run of thoughts and tool calls between
  * two narration messages; expanding lists them in order. Mirrors the thought
  * group: open while the run is the turn's live edge, and once activity moves
- * past it — or the turn settles — it stays open only when a call needs a
- * look: an unfinished or failed call sits one click deep, not two. A manual
- * toggle sticks (userOverride) until a call newly needs attention, which
- * re-arms the auto-drive.
+ * past it — or the turn settles — it stays open only while a call is
+ * unfinished, so it sits one click deep, not two. A failed run folds like
+ * any other and flags itself in red. A manual toggle sticks (userOverride)
+ * until a call newly needs attention, which re-arms the auto-drive.
  */
 function WorkRunGroupComponent({
   items,
@@ -69,6 +72,7 @@ function WorkRunGroupComponent({
   active,
   isLiveTail,
   attentionRequired,
+  failed,
   enter,
   filePathContext,
   onOpenSubagent
@@ -98,7 +102,8 @@ function WorkRunGroupComponent({
         data-press-feedback="off"
         className={cn(
           'flex w-full cursor-pointer items-center gap-1.5 text-left text-xs text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
-          CHAT_ROW_MIN_H
+          CHAT_ROW_MIN_H,
+          failed && 'text-destructive'
         )}
       >
         <motion.span

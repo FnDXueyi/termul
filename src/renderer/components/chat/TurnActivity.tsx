@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 import { ChatMessage } from './ChatMessage'
 import { CHAT_ROW_MIN_H } from './chat-layout'
 import { CHEVRON_TRANSITION } from './chat-motion'
-import { activityNeedsAttention, type TimelineItem } from './chat-timeline'
+import type { TimelineItem } from './chat-timeline'
 import { formatTurnDuration } from './format-turn-duration'
 import { RowReveal } from './RowReveal'
 import { ThinkingStatus } from './ThinkingStatus'
@@ -72,6 +72,7 @@ function TurnActivityComponent({
         items: WorkRunItem[]
         summary: ToolActivitySummary
         attentionRequired: boolean
+        failed: boolean
       }
     >()
     let run: WorkRunItem[] | null = null
@@ -86,7 +87,12 @@ function TurnActivityComponent({
           const entry = {
             items: run,
             summary: runSummary,
-            attentionRequired: activityNeedsAttention(run)
+            attentionRequired: run.some(
+              (member) =>
+                member.kind === 'tool' &&
+                (member.tool.status === 'pending' || member.tool.status === 'in_progress')
+            ),
+            failed: run.some((member) => member.kind === 'tool' && member.tool.status === 'failed')
           }
           for (const member of run) runs.set(member.key, entry)
         }
@@ -156,6 +162,7 @@ function TurnActivityComponent({
                     // (narration, the turn's reply) folds the group.
                     isLiveTail={active && run.items[run.items.length - 1] === lastItem}
                     attentionRequired={run.attentionRequired}
+                    failed={run.failed}
                     enter={enter}
                     filePathContext={filePathContext}
                     onOpenSubagent={onOpenSubagent}
