@@ -300,7 +300,7 @@ impl GhCalls {
 
 #[test]
 fn gh_missing_is_unavailable() {
-    let result = submit_with("t", "b", |_| spawn_error());
+    let result = submit_with("t", "b", |_, _| spawn_error());
     assert!(
         matches!(result, BugReportSubmitResult::Unavailable { .. }),
         "{result:?}"
@@ -309,13 +309,13 @@ fn gh_missing_is_unavailable() {
 
 #[test]
 fn gh_version_failure_is_unavailable() {
-    let result = submit_with("t", "b", |_| output(1, "", "weird"));
+    let result = submit_with("t", "b", |_, _| output(1, "", "weird"));
     assert!(matches!(result, BugReportSubmitResult::Unavailable { .. }));
 }
 
 #[test]
 fn gh_not_authenticated_is_unavailable() {
-    let result = submit_with("t", "b", |args| {
+    let result = submit_with("t", "b", |args, _| {
         if args[0] == OsStr::new("auth") {
             output(1, "", "not logged in")
         } else {
@@ -332,7 +332,7 @@ fn gh_not_authenticated_is_unavailable() {
 
 #[test]
 fn gh_create_spawn_failure_is_unavailable() {
-    let result = submit_with("t", "b", |args| {
+    let result = submit_with("t", "b", |args, _| {
         if args[0] == OsStr::new("issue") {
             spawn_error()
         } else {
@@ -344,7 +344,7 @@ fn gh_create_spawn_failure_is_unavailable() {
 
 #[test]
 fn gh_create_failure_is_failed_with_stderr() {
-    let result = submit_with("t", "b", |args| {
+    let result = submit_with("t", "b", |args, _| {
         if args[0] == OsStr::new("issue") {
             output(1, "", "graphql: permission denied\nsecond line")
         } else {
@@ -364,7 +364,7 @@ fn gh_success_returns_issue_url_and_cleans_up_body_file() {
     let calls = GhCalls::new();
     let staged = RefCell::new(PathBuf::new());
     let staged_body = RefCell::new(String::new());
-    let result = submit_with("the title", "the body", |args| {
+    let result = submit_with("the title", "the body", |args, _| {
         calls.record(args);
         if args[0] == OsStr::new("issue") {
             let pos = args
@@ -410,7 +410,7 @@ fn gh_success_returns_issue_url_and_cleans_up_body_file() {
 
 #[test]
 fn gh_success_without_url_is_failed() {
-    let result = submit_with("t", "b", |args| {
+    let result = submit_with("t", "b", |args, _| {
         if args[0] == OsStr::new("issue") {
             output(0, "Created issue draft", "")
         } else {
@@ -423,7 +423,7 @@ fn gh_success_without_url_is_failed() {
 #[test]
 fn submit_failure_still_removes_body_file() {
     let staged = RefCell::new(PathBuf::new());
-    let result = submit_with("t", "b", |args| {
+    let result = submit_with("t", "b", |args, _| {
         if args[0] == OsStr::new("issue") {
             let pos = args
                 .iter()
@@ -442,7 +442,7 @@ fn submit_failure_still_removes_body_file() {
 fn gh_timeout_maps_to_unavailable() {
     // `run_with_timeout` reports a hung `gh` as io TimedOut; every `Err`
     // arm in `submit_with` maps that to Unavailable (fallback path).
-    let result = submit_with("t", "b", |_| {
+    let result = submit_with("t", "b", |_, _| {
         Err(io::Error::new(ErrorKind::TimedOut, "gh did not exit"))
     });
     assert!(

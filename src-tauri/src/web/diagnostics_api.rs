@@ -74,6 +74,10 @@ async fn diagnostics(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
+    // `shared_live` selects the desktop log candidate inside
+    // `host_log_path`. That arm is unreachable today — `check_local_only`
+    // denies every peer on a shared-live host before the collect closure
+    // runs — but resolves correctly should the admission rules loosen.
     let shared_live = state.shared_live_writes_denied;
     diagnostics_inner(peer, &state, move || {
         crate::diagnostics::collect_bug_report_context(host_log_path(shared_live).as_deref())
@@ -156,7 +160,12 @@ async fn report_bug_inner(
     }
 }
 
-/// Best-effort path of the host's active log file. `shared_live` says
+/// Best-effort path of the host's active log file. NOTE: the `shared_live`
+/// arm is currently dead — a shared-live host denies every peer at the
+/// `check_local_only` gate — it is kept so the candidate stays correct if
+/// that admission rule ever changes.
+///
+/// `shared_live` says
 /// WHICH host shape this process is (the route only ever runs inside one):
 /// on the desktop shared-live host (`shared_live_writes_denied: true`)
 /// only the desktop `termul.log` candidate is tried — a stale

@@ -31,11 +31,15 @@ const ISSUE_HOST: &str = "github.com";
 /// Most chars of `gh` stderr kept in a `Failed` reason.
 const GH_STDERR_MAX: usize = 512;
 
-/// Longest any single `gh` invocation may run before the child is killed
-/// and the call reports [`io::ErrorKind::TimedOut`]. One bound for the
-/// probes (`--version`, `auth status`) and `issue create` alike — a hung
-/// `gh` must not pin the blocking thread (and the submit spinner) forever.
-const GH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Longest a `gh` probe (`--version`, `auth status`) may run before the
+/// child is killed and the call reports [`io::ErrorKind::TimedOut`]. The
+/// probes are local reads — 15 s is generous; a hung `gh` must not pin the
+/// blocking thread (and the submit spinner) forever.
+const GH_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest `gh issue create` may run — it does real network work, so it
+/// gets the larger share. Total worst case across the three calls is
+/// ~120 s, bounded per step rather than one global budget.
+const GH_CREATE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Poll cadence for the `gh` timeout loop.
 const GH_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -133,10 +137,10 @@ pub fn submit_bug_report(title: &str, body: &str) -> BugReportSubmitResult {
 fn submit_with(
     title: &str,
     body: &str,
-    run_gh: impl Fn(&[&OsStr]) -> io::Result<Output>,
+    run_gh: impl Fn(&[&OsStr], Duration) -> io::Result<Output>,
 ) -> BugReportSubmitResult {
     log::info!("[diagnostics] bug report submit: probing gh");
-    match run_gh(&[OsStr::new("--version")]) {
+    match run_gh(&[OsStr::new("--version")], GH_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
             log::warn!("[diagnostics] gh --version exited {}", output.status);
@@ -157,7 +161,7 @@ fn submit_with(
         OsStr::new("--hostname"),
         OsStr::new(ISSUE_HOST),
     ];
-    match run_gh(&auth_args) {
+    match run_gh(&auth_args, GH_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
             log::warn!(
@@ -197,7 +201,7 @@ fn submit_with(
         OsStr::new("--body-file"),
         body_file.0.as_os_str(),
     ];
-    match run_gh(&create_args) {
+    match run_gh(&create_args, GH_CREATE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             match parse_issue_url(&stdout) {
@@ -231,9 +235,9 @@ fn submit_with(
 }
 
 /// Run `gh` with an arg array (no shell); process output, spawn error, or
-/// [`io::ErrorKind::TimedOut`] when the child outlives [`GH_TIMEOUT`].
-fn gh_output(args: &[&OsStr]) -> io::Result<Output> {
-    run_with_timeout("gh", args, GH_TIMEOUT)
+/// [`io::ErrorKind::TimedOut`] when the child outlives `timeout`.
+fn gh_output(args: &[&OsStr], timeout: Duration) -> io::Result<Output> {
+    run_with_timeout("gh", args, timeout)
 }
 
 /// Spawn `program` and collect its output within `timeout`. Stdout and

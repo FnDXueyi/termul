@@ -390,6 +390,7 @@ export function ReportBugDialog(): React.JSX.Element {
             <AttachmentPreviewGroup
               attachments={attachments}
               onRemove={removeAttachment}
+              removeDisabled={busy}
               className="px-0 pt-0"
               attachmentActions={(att) =>
                 isImageMime(att.mimeType) ? (

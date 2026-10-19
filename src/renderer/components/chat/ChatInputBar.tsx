@@ -665,7 +665,11 @@ export function ChatInputBar({
               </div>
             )}
             {permission && <PermissionPrompt permission={permission} isVisible={isVisible} />}
-            <AttachmentPreviewGroup attachments={attachments} onRemove={removeAttachment} />
+            <AttachmentPreviewGroup
+              attachments={attachments}
+              onRemove={removeAttachment}
+              removeDisabled={disabled}
+            />
             <div className="flex items-start gap-1 px-4 pb-1.5 pt-3.5">
               {/* Tiptap rich-text editor — the skill "pill" is a real inline
                   DOM node (a Tiptap `NodeView`), so the caret sits flush

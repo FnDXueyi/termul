@@ -6,7 +6,7 @@
  *
  * Uses @tauri-apps/plugin-opener for cross-platform file operations on the
  * desktop. On web/remote, `openUrlWithSystemBrowser` branches to
- * `window.open(url, '_blank', 'noopener')` so the "View on GitHub" button in
+ * `window.open(url, '_blank')` so the "View on GitHub" button in
  * `WhatsNewModal` works in a browser. The other two methods
  * (`openWithExternalApp`, `revealInFileManager`) have no browser equivalent
  * and return an explicit `WEB_UNSUPPORTED` result when called on web — they
@@ -62,7 +62,11 @@ function createTauriOpenerApi(): OpenerApi {
           return { success: true, data: undefined }
         }
         try {
-          const opened = window.open(url, '_blank', 'noopener')
+          // No 'noopener' feature: it makes window.open return null even on
+          // success, so the popup-blocked check below could never be honest.
+          // Modern browsers imply noopener for _blank anyway, and the opener
+          // reference is cleared explicitly for older ones.
+          const opened = window.open(url, '_blank')
           if (opened === null) {
             return {
               success: false,
@@ -70,6 +74,7 @@ function createTauriOpenerApi(): OpenerApi {
               code: 'OPEN_URL_ERROR'
             }
           }
+          opened.opener = null
         } catch (error) {
           // SecurityError or a popup-blocker throw — same class of failure as
           // the desktop `openUrl` rejection.

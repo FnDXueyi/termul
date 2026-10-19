@@ -26,6 +26,11 @@ interface AttachmentPreviewGroupProps {
    * button; composers leave it unset.
    */
   attachmentActions?: (attachment: PendingAttachment) => React.ReactNode
+  /**
+   * When the owning `useComposerAttachments` is disabled, removal is frozen —
+   * show the remove control disabled instead of live-but-inert.
+   */
+  removeDisabled?: boolean
 }
 
 /** Staged-attachment badges shown in a composer above the textarea. */
@@ -33,7 +38,8 @@ export function AttachmentPreviewGroup({
   attachments,
   onRemove,
   className,
-  attachmentActions
+  attachmentActions,
+  removeDisabled = false
 }: AttachmentPreviewGroupProps): React.JSX.Element | null {
   const reduced = useReducedMotion() ?? false
 
@@ -87,7 +93,7 @@ export function AttachmentPreviewGroup({
                   </>
                 )}
                 {attachmentActions?.(a)}
-                <AttachmentRemove label={`Remove ${ariaLabel}`} />
+                <AttachmentRemove label={`Remove ${ariaLabel}`} disabled={removeDisabled} />
               </Attachment>
             </motion.div>
           )

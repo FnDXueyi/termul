@@ -1994,7 +1994,11 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
                 factoryKeyAuth={factoryKeyAuth}
                 inlineKeyMethodId={inlineKeyMethodId}
               />
-              <AttachmentPreviewGroup attachments={attachments} onRemove={removeAttachment} />
+              <AttachmentPreviewGroup
+                attachments={attachments}
+                onRemove={removeAttachment}
+                removeDisabled={composerDisabled}
+              />
               {/* Same inner rhythm as the chat composer card (ChatInputBar):
                   editor row px-4 pb-1.5 pt-3.5, toolbar px-2 pb-2. */}
               <div className="px-4 pb-1.5 pt-3.5">
