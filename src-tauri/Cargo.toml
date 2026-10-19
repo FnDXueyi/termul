@@ -250,6 +250,9 @@ notify-rust = "4.18"
 # (web::auth::open_token_file). Already in the tree transitively.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Directory-relative (openat/renameat) canvas export writes
+# (acp::host_mcp::canvas_policy). Already in the tree transitively.
+rustix = { version = "1", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

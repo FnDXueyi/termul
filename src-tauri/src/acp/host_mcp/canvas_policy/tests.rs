@@ -410,3 +410,57 @@ fn an_export_write_holds_its_folders_so_none_can_be_swapped_for_a_link() {
         "a folder swapped for a link since the check is refused"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn an_export_write_refuses_a_folder_that_is_a_link() {
+    let project = Project::new();
+    let root = std::fs::canonicalize(project.root()).unwrap();
+    let written = write_project_file(&project.root(), "assets/icons/a.png", b"png").unwrap();
+    assert_eq!(std::fs::read(&written.absolute).unwrap(), b"png");
+    write_project_file(&project.root(), "assets/icons/a.png", b"png2").unwrap();
+    assert_eq!(std::fs::read(&written.absolute).unwrap(), b"png2");
+
+    std::fs::rename(root.join("assets"), root.join("moved")).unwrap();
+    let outside = project.0.join("outside");
+    std::fs::create_dir_all(outside.join("icons")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("assets")).unwrap();
+    assert!(
+        write_in_real_folder(
+            &root,
+            &root.join("assets").join("icons"),
+            "a.png".as_ref(),
+            b"escaped"
+        )
+        .is_err(),
+        "a folder swapped for a link since the check is refused"
+    );
+    assert!(!outside.join("icons").join("a.png").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_export_write_lands_in_the_folder_it_opened_even_if_it_moves() {
+    let project = Project::new();
+    let root = std::fs::canonicalize(project.root()).unwrap();
+    std::fs::create_dir_all(root.join("assets").join("icons")).unwrap();
+    let folder = open_real_folder(&root, &root.join("assets").join("icons")).unwrap();
+
+    std::fs::rename(root.join("assets"), root.join("moved")).unwrap();
+    let outside = project.0.join("outside");
+    std::fs::create_dir_all(outside.join("icons")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("assets")).unwrap();
+
+    use std::os::fd::AsFd;
+    crate::acp::atomic_file::replace_at(folder.as_fd(), "a.png".as_ref(), b"png").unwrap();
+    assert_eq!(
+        std::fs::read(root.join("moved").join("icons").join("a.png")).unwrap(),
+        b"png"
+    );
+    assert!(!outside.join("icons").join("a.png").exists());
+    let leftovers: Vec<_> = std::fs::read_dir(root.join("moved").join("icons"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(leftovers, ["a.png"]);
+}

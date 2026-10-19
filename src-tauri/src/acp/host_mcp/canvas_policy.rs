@@ -307,9 +307,9 @@ pub fn resolve_project_file(root: &Path, requested: &str) -> Result<ProjectFile,
 /// Write `bytes` to `requested` inside `root`, checking the path again right
 /// before the write: a link planted since an earlier check (while the editor
 /// exported) must not lead the write out of the project. The write goes
-/// through the parent as it resolves after its folders exist, and on Windows
-/// those folders are held open through the write so none can be swapped for
-/// a link after the check ([`hold_real_folders`]).
+/// through the parent as it resolves after its folders exist, and the
+/// folders from the root down are opened without following links so none
+/// swapped for a link after the check can redirect it ([`write_in_real_folder`]).
 pub fn write_project_file(
     root: &Path,
     requested: &str,
@@ -336,17 +336,63 @@ pub fn write_project_file(
             ),
         ));
     }
-    let _held = hold_real_folders(&resolved_root, &resolved_parent).map_err(failed)?;
-    crate::acp::atomic_file::replace(&resolved_parent.join(name), bytes).map_err(failed)?;
+    write_in_real_folder(&resolved_root, &resolved_parent, name, bytes).map_err(failed)?;
     Ok(file)
+}
+
+#[cfg(windows)]
+fn write_in_real_folder(
+    root: &Path,
+    dir: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let _held = hold_real_folders(root, dir)?;
+    crate::acp::atomic_file::replace(&dir.join(name), bytes)
+}
+
+/// Unix lets a held folder be renamed, so the write never goes by path: it
+/// names `name` inside the folder opened by [`open_real_folder`].
+#[cfg(unix)]
+fn write_in_real_folder(
+    root: &Path,
+    dir: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::os::fd::AsFd;
+    let folder = open_real_folder(root, dir)?;
+    crate::acp::atomic_file::replace_at(folder.as_fd(), name, bytes)
+}
+
+/// Open `root`, then each folder down to `dir` (a canonical path under it)
+/// relative to the one above, refusing any that is a link now.
+#[cfg(unix)]
+fn open_real_folder(root: &Path, dir: &Path) -> std::io::Result<rustix::fd::OwnedFd> {
+    use rustix::fs::{openat, Mode, OFlags, CWD};
+    use rustix::io::Errno;
+    let below = dir
+        .strip_prefix(root)
+        .map_err(|_| std::io::Error::other("the folder is outside the project"))?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut folder = openat(CWD, root, flags, Mode::empty())?;
+    for part in below.components() {
+        folder = openat(&folder, part.as_os_str(), flags, Mode::empty()).map_err(|error| {
+            if error == Errno::LOOP || error == Errno::NOTDIR {
+                std::io::Error::other("a folder on the path became a link after the check")
+            } else {
+                error.into()
+            }
+        })?;
+    }
+    Ok(folder)
 }
 
 /// Open `root` and each folder down to `dir` (a canonical path under it)
 /// without following a link, refusing one that is a link now. Windows lets
 /// nobody rename or delete a folder, or any folder above it, while a handle
 /// that does not share delete access is open, so the checked path keeps
-/// naming the same real folders until the handles drop. Other platforms have
-/// no such hold in `std`; their write relies on the check alone.
+/// naming the same real folders until the handles drop.
 #[cfg(windows)]
 fn hold_real_folders(root: &Path, dir: &Path) -> std::io::Result<Vec<std::fs::File>> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -376,11 +422,6 @@ fn hold_real_folders(root: &Path, dir: &Path) -> std::io::Result<Vec<std::fs::Fi
         held.push(handle);
     }
     Ok(held)
-}
-
-#[cfg(not(windows))]
-fn hold_real_folders(_root: &Path, _dir: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
