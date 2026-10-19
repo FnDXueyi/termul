@@ -108,7 +108,7 @@ describe('TurnActivity work runs', () => {
     expect(screen.queryByRole('button', { name: /^Thought 1 time|^Thought$/ })).toBeNull()
   })
 
-  it('keeps the live run open with its streaming thought, then folds it when narration lands', async () => {
+  it('starts the live run collapsed and streams its thought once opened', () => {
     const before = [
       narration('a', 'Narration A'),
       thought('t1', 'Check the tests'),
@@ -128,21 +128,15 @@ describe('TurnActivity work runs', () => {
         />
       </TooltipProvider>
     )
-    const { rerender } = render(ui(before))
+    render(ui(before))
 
-    expect(
-      screen.getByRole('button', { name: 'Thought 2 times, ran 1 command' })
-    ).toBeInTheDocument()
+    const run = screen.getByRole('button', { name: 'Thought 2 times, ran 1 command' })
+    expect(run).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('npm test')).toBeNull()
+
+    fireEvent.click(run)
     expect(screen.getByText('npm test')).toBeInTheDocument()
     expect(screen.getByText('Thinking…')).toBeInTheDocument()
-
-    rerender(ui([...before.slice(0, 3), thought('t2', 'Now the build'), narration('b', 'B')]))
-
-    expect(
-      screen.getByRole('button', { name: 'Thought 2 times, ran 1 command' })
-    ).toBeInTheDocument()
-    await waitFor(() => expect(screen.queryByText('npm test')).toBeNull())
-    expect(screen.queryByText('Thinking…')).toBeNull()
   })
 
   it('labels a tool-only run exactly as before', () => {

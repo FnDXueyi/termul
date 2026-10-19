@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from 'framer-motion'
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useState } from 'react'
 import { ChevronRight } from '@/components/icons'
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -10,7 +10,6 @@ import { CHAT_ROW_MIN_H } from './chat-layout'
 import { CHEVRON_TRANSITION } from './chat-motion'
 import type { TimelineItem } from './chat-timeline'
 import { RowReveal } from './RowReveal'
-import { ThinkingStatus } from './ThinkingStatus'
 import { ThoughtGroup } from './ThoughtGroup'
 import { ToolCallCard } from './ToolCallCard'
 import type { ToolActivitySummary } from './tool-call-summary'
@@ -46,11 +45,9 @@ interface WorkRunGroupProps {
   summary: ToolActivitySummary
   /** The parent turn is still running. */
   active: boolean
-  /** True while this run owns the turn's last timeline item — its live edge. */
+  /** True while this run owns the turn's last timeline item, so its trailing thought streams. */
   isLiveTail: boolean
-  /** An unfinished call: the run stays open so it sits one click deep. */
-  attentionRequired: boolean
-  /** A failed call: the run still folds, but its trigger reads red. */
+  /** A call failed: the trigger reads red. */
   failed: boolean
   enter: EnterTracker
   filePathContext?: FilePathResolutionContext
@@ -59,45 +56,25 @@ interface WorkRunGroupProps {
 
 /**
  * One nested disclosure rolling up a run of thoughts and tool calls between
- * two narration messages; expanding lists them in order. Mirrors the thought
- * group: open while the run is the turn's live edge, and once activity moves
- * past it — or the turn settles — it stays open only while a call is
- * unfinished, so it sits one click deep, not two. A failed run folds like
- * any other and flags itself in red. A manual toggle sticks (userOverride)
- * until a call newly needs attention, which re-arms the auto-drive.
+ * two narration messages; expanding lists them in order. Always starts
+ * collapsed, live or failed, so narration stays adjacent; a failed run
+ * flags itself in red instead of opening.
  */
 function WorkRunGroupComponent({
   items,
   summary,
   active,
   isLiveTail,
-  attentionRequired,
   failed,
   enter,
   filePathContext,
   onOpenSubagent
 }: WorkRunGroupProps): React.JSX.Element {
   const reduced = useReducedMotion() ?? false
-  const [open, setOpen] = useState(isLiveTail || attentionRequired)
-  const userOverride = useRef(false)
-  const wasAttentionRequired = useRef(attentionRequired)
-
-  useEffect(() => {
-    // A call that newly needs attention is a fresh event: it re-arms the
-    // auto-drive even after a manual toggle.
-    if (attentionRequired && !wasAttentionRequired.current) userOverride.current = false
-    wasAttentionRequired.current = attentionRequired
-    if (userOverride.current) return
-    setOpen(isLiveTail || attentionRequired)
-  }, [isLiveTail, attentionRequired])
-
-  const handleOpenChange = (next: boolean): void => {
-    userOverride.current = true
-    setOpen(next)
-  }
+  const [open, setOpen] = useState(false)
 
   return (
-    <Collapsible open={open} onOpenChange={handleOpenChange} className="min-w-0">
+    <Collapsible open={open} onOpenChange={setOpen} className="min-w-0">
       <CollapsibleTrigger
         data-press-feedback="off"
         className={cn(
@@ -114,7 +91,7 @@ function WorkRunGroupComponent({
         >
           <ChevronRight size={13} />
         </motion.span>
-        <ThinkingStatus text={summary.label} shimmer={false} />
+        <span className="truncate tabular-nums">{summary.label}</span>
         <DiffStat added={summary.added} removed={summary.removed} />
       </CollapsibleTrigger>
       <CollapsibleContent forceMount>

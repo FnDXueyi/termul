@@ -71,7 +71,6 @@ function TurnActivityComponent({
       {
         items: WorkRunItem[]
         summary: ToolActivitySummary
-        attentionRequired: boolean
         failed: boolean
       }
     >()
@@ -87,11 +86,6 @@ function TurnActivityComponent({
           const entry = {
             items: run,
             summary: runSummary,
-            attentionRequired: run.some(
-              (member) =>
-                member.kind === 'tool' &&
-                (member.tool.status === 'pending' || member.tool.status === 'in_progress')
-            ),
             failed: run.some((member) => member.kind === 'tool' && member.tool.status === 'failed')
           }
           for (const member of run) runs.set(member.key, entry)
@@ -157,11 +151,8 @@ function TurnActivityComponent({
                     items={run.items}
                     summary={run.summary}
                     active={active}
-                    // The run is the turn's live edge while its last item is
-                    // the timeline's last item; anything arriving after it
-                    // (narration, the turn's reply) folds the group.
+                    // Lets a still-streaming thought inside the run keep streaming.
                     isLiveTail={active && run.items[run.items.length - 1] === lastItem}
-                    attentionRequired={run.attentionRequired}
                     failed={run.failed}
                     enter={enter}
                     filePathContext={filePathContext}
