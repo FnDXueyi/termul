@@ -122,7 +122,7 @@ Findings file as issues per Pass 3 rules. Two failure classes deserve a second l
 
 Two schedules share one lock (`/root/termul-routine-automation/.routine-lock`, `flock -n`), so runs never overlap:
 
-- **Hourly fast lane** (`scripts/routine/run-fast-lane.sh`, cron at minute 7): new-issue labels only (no comments, hourly repeats would spam) plus AT MOST ONE bug-fix PR to dev per run, 45-minute bound. A crashed run re-scans next hour, safe because label mutations are idempotent.
+- **Hourly fast lane, parallel** (`scripts/routine/run-fast-lane.sh`, cron at minute 7, `TERMUL_FAST_WORKERS`, default 3): one triage dispatcher (labels only, never comments) plus up to 3 issue->PR workers, each in its own git worktree (`.wt/worker-<n>`, carved from the internal branch, branching `routine/<issue>-<slug>` from `origin/dev` on claim). Per-worker locks make a long-running worker survive into the next tick with its slot left empty rather than stacking. Worker bound is 50 minutes; a deadline-hit worker's uncommitted WIP is salvaged onto its branch as a `wip:` commit by the next human or run that finds it.
 - **Daily full routine** (`scripts/routine/run-routine.sh`, 18:30 UTC): everything in this skill, Pass 3 and Pass 4 included, up to 3 Pass 2 PRs.
 
 Unattended Pass 2 (issue → PR), explicit operator policy, 2026-10-19:
