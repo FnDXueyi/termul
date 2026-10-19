@@ -28,6 +28,8 @@ bundle            canvas/figcraft.pin -> canvas/bundle/ (embedded, same asset se
 
 A canvas document is a `.figcraft` file. Opening the canvas picks the project root's alphabetically first `.figcraft` file, or creates `design.figcraft` on the first save. Other extensions are never opened as a canvas. The file explorer opens a `.figcraft` file as the project's canvas tab.
 
+After every load the renderer sends the editor `host.file {name, path, location}`: the file stem (`design`), the project-relative path that `save_file` also reports (`design.figcraft`), and the project name. The editor's header, window title, `inspect_document` and `inspect_ui` show them, and the project name takes the place of figcraft's "Drafts". The editor never receives an absolute path. A bundle older than the call answers `UNKNOWN_METHOD`, and the document then shows as "Untitled".
+
 ## Lifecycle
 
 - **Mount once per project.** The first open mounts the iframe. Closing the tab hides the mount (an offscreen 1x1 visible iframe, never `display:none`) so agents can keep working. A mount ends on project close, an explicit close, eviction, or lease loss.

@@ -68,11 +68,12 @@ import {
   type CanvasBridgeReply,
   type JsonText
 } from '@/lib/canvas-bridge'
-import { sameCanvasDoc } from '@/lib/canvas-doc'
+import { canvasDocFile, sameCanvasDoc } from '@/lib/canvas-doc'
 import { readCanvasThemeTokens } from '@/lib/canvas-theme'
 import { logFrontendError } from '@/lib/log-api'
 import { basename } from '@/lib/path-basename'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
+import { useProjectStore } from '@/stores/project-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 
 export interface CanvasMount {
@@ -398,6 +399,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     patchSession(projectId, { phase: { kind: 'ready', mount }, ...projectionOf(view) })
     get().pushTheme(projectId)
     get().pushLocale(projectId)
+    pushFile(projectId)
   }
 
   const setSaving = (projectId: string, delta: 1 | -1): void => {
@@ -543,6 +545,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     if (!isLiveMount(projectId, mountSeq)) return false
     if (!loaded.success) return reloadNotTaken(projectId, mountSeq, loaded.code)
     patchSession(projectId, projectionOf(loaded.data))
+    pushFile(projectId)
     return true
   }
 
@@ -584,6 +587,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       if (!reply.ok) {
         logCanvas('warn', method, `${method} failed for project ${projectId}: ${reply.error.code}`)
       }
+    })
+  }
+
+  /** The editor knows nothing of the file it shows: without this it names
+   * the document by what is stored inside it ("Untitled"). A document load
+   * resets it, so it follows every load. */
+  const pushFile = (projectId: string): void => {
+    sendHostCall(projectId, 'host.file', () => {
+      const docPath = get().sessions[projectId]?.docPath ?? ''
+      const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
+      return asJsonText(JSON.stringify(canvasDocFile(docPath, project)))
     })
   }
 

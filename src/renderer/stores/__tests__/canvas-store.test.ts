@@ -82,6 +82,7 @@ import { asJsonText, createCanvasBridge } from '@/lib/canvas-bridge'
 import type { LeafNode } from '@/types/workspace.types'
 import { useAppSettingsStore } from '../app-settings-store'
 import { type CanvasMount, pinVerdict, useCanvasStore } from '../canvas-store'
+import { useProjectStore } from '../project-store'
 import { useWorkspaceStore } from '../workspace-store'
 
 const PROJECT = 'proj-1'
@@ -483,11 +484,27 @@ describe('mount and load', () => {
     ])
   })
 
+  it('names the loaded file for the editor by its project path and project', async () => {
+    useProjectStore.setState({
+      projects: [{ id: PROJECT, name: 'Proj', color: 'blue', path: 'c:\\proj' }]
+    })
+    const editor = await mountReady()
+    expect(editor.sent('host.file').map((r) => JSON.parse(r.params))).toEqual([
+      { name: 'design', path: 'design.figcraft', location: 'Proj' }
+    ])
+    const methods = editor.posted.map((r) => r.method)
+    expect(methods.indexOf('host.file')).toBeGreaterThan(methods.indexOf('host.openDocument'))
+    useProjectStore.setState({ projects: [] })
+  })
+
   it('a document that does not exist yet starts empty: no host.openDocument, null ack', async () => {
     const editor = await mountReady(null)
     expect(editor.sent('host.openDocument')).toHaveLength(0)
     expect(documentLoaded).toHaveBeenCalledWith(PROJECT, 41, null)
     expect(session()?.phase.kind).toBe('ready')
+    expect(editor.sent('host.file').map((r) => JSON.parse(r.params))).toEqual([
+      { name: 'design', path: 'design.figcraft', location: null }
+    ])
   })
 
   it('a document the editor cannot open fails the mount and never reports it loaded', async () => {
@@ -873,6 +890,7 @@ describe('disk changes (AD-27)', () => {
     expect(documentLoaded).toHaveBeenLastCalledWith(PROJECT, 41, '{"contentVersion":9}')
     expect(session()?.savedVersion).toBe('9')
     expect(toastWarning).not.toHaveBeenCalled()
+    expect(editor.sent('host.file'), 'the reloaded document is named again').toHaveLength(2)
   })
 
   it('a reload is not applied once the editor moved past the version the host judged clean', async () => {
