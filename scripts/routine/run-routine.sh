@@ -8,20 +8,14 @@ REPO="/root/termul-routine-automation"
 LOG_DIR="$REPO/goal-routine-runs/_automation"
 RUN_ID="$(date -u +%Y%m%d-%H%M%S)"
 
-# Sync the automation clone to dev HEAD. Safe: the clone exists only for this
-# runner and carries no local work. Then create the log dir: the clean pass
-# must run before it.
-git -C "$REPO" fetch --quiet origin dev
-git -C "$REPO" reset --hard --quiet origin/dev
+# Sync the automation clone to the internal routine branch. This stack is
+# internal-only (never merged to the public dev); the clone exists only for
+# this runner and carries no local work.
+git -C "$REPO" fetch --quiet origin chore/agent-routine-skill
+git -C "$REPO" reset --hard --quiet origin/chore/agent-routine-skill
 git -C "$REPO" clean -fdq -- goal-routine-runs/_automation
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$RUN_ID.log"
-
-# Refuse to run until the routine skill is actually on dev (PR 1406 merge gate).
-if [ ! -f "$REPO/.claude/skills/termul-routines/SKILL.md" ]; then
-  echo "termul-routines skill not on dev yet (PR 1406 unmerged); skipping run." >> "$LOG"
-  exit 0
-fi
 
 # Kill anything a previous run left behind (a leaked server pins a core: #1391).
 pkill -9 -f 'termul-nightly-audit-.*termul-server' 2>/dev/null || true
