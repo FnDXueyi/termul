@@ -99,7 +99,8 @@ const INFO: CanvasOpenInfo = {
   pinTag: PIN,
   docKey: DOC_A,
   mountSeq: 41,
-  evicted: []
+  evicted: [],
+  fallbackFonts: []
 }
 
 function openInfo(overrides: Partial<CanvasOpenInfo> = {}): IpcResult<CanvasOpenInfo> {
@@ -673,6 +674,69 @@ describe('mount and load', () => {
       .applyRemount(PROJECT, { previousMountSeq: 7, mountSeq: 8, reason: 'x', lost: null })
     expect(applied).toBe(false)
     expect(currentMount().mountSeq).toBe(41)
+  })
+})
+
+describe('fallback fonts (#1421)', () => {
+  const FONTS = ['host-fonts/seguisym.ttf', 'host-fonts/msyh.ttc']
+
+  beforeEach(async () => {
+    open.mockResolvedValueOnce(openInfo({ fallbackFonts: FONTS }))
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    readDocument.mockResolvedValueOnce(ok({ bytes: 'AAEC' }))
+    documentLoaded.mockResolvedValueOnce(ok(view()))
+  })
+
+  it('the lent fonts load before the document, so its first render has them', async () => {
+    const editor = mountEditor()
+    editor.ready()
+    editor.reply('host.describe', JSON.stringify({ tag: PIN, engineVersion: '0.6.0' }))
+    await flush()
+    expect(editor.sent('host.fallbackFonts').map((r) => JSON.parse(r.params))).toEqual([
+      { urls: FONTS }
+    ])
+    expect(editor.sent('host.openDocument')).toHaveLength(0)
+
+    editor.reply('host.fallbackFonts', '{"families":["Segoe UI Symbol"],"failed":[]}')
+    await flush()
+    editor.reply('host.openDocument', '{"contentVersion":3}')
+    await flush()
+    expect(session()?.phase.kind).toBe('ready')
+  })
+
+  it('a bundle without host.fallbackFonts still mounts', async () => {
+    const editor = mountEditor()
+    editor.ready()
+    editor.reply('host.describe', JSON.stringify({ tag: PIN, engineVersion: '0.6.0' }))
+    await flush()
+    editor.fail('host.fallbackFonts', 'UNKNOWN_METHOD')
+    await flush()
+    editor.reply('host.openDocument', '{"contentVersion":3}')
+    await flush()
+
+    expect(session()?.phase.kind).toBe('ready')
+    expect(logFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'info', message: expect.stringContaining('UNKNOWN_METHOD') })
+    )
+  })
+
+  it('a font the editor could not load is logged and the mount goes on', async () => {
+    const editor = mountEditor()
+    editor.ready()
+    editor.reply('host.describe', JSON.stringify({ tag: PIN, engineVersion: '0.6.0' }))
+    await flush()
+    editor.reply(
+      'host.fallbackFonts',
+      '{"families":[],"failed":[{"url":"host-fonts/msyh.ttc","error":"HTTP 404"}]}'
+    )
+    await flush()
+    editor.reply('host.openDocument', '{"contentVersion":3}')
+    await flush()
+
+    expect(session()?.phase.kind).toBe('ready')
+    expect(logFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'warn', message: expect.stringContaining('HTTP 404') })
+    )
   })
 })
 

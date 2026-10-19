@@ -369,6 +369,32 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     return loaded.data
   }
 
+  /** #1421: the editor embeds only Inter, so symbols, CJK and emoji come
+   * from the system fonts the desktop lends it. They load before the
+   * document, so its first render and an agent's first screenshot have
+   * them. A failure costs only those characters, never the mount. */
+  const loadFallbackFonts = async (projectId: string, mount: CanvasMount, bridge: CanvasBridge) => {
+    const urls = mount.info.fallbackFonts
+    if (urls.length === 0) return
+    const reply = await bridge.call('host.fallbackFonts', asJsonText(JSON.stringify({ urls })))
+    if (!reply.ok) {
+      // UNKNOWN_METHOD: a bundle older than `host.fallbackFonts`.
+      logCanvas(
+        reply.error.code === 'UNKNOWN_METHOD' ? 'info' : 'warn',
+        'fonts',
+        `fallback fonts not loaded for project ${projectId}: ${reply.error.code} ${reply.error.message}`
+      )
+      return
+    }
+    if (!/"failed"\s*:\s*\[\s*\]/.test(reply.result)) {
+      logCanvas(
+        'warn',
+        'fonts',
+        `some fallback fonts failed for project ${projectId}: ${reply.result}`
+      )
+    }
+  }
+
   const completeMount = async (projectId: string, mount: CanvasMount): Promise<void> => {
     const bridge = currentBridge(projectId, mount.mountSeq)
     if (!bridge) return
@@ -389,6 +415,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       )
       return
     }
+    await loadFallbackFonts(projectId, mount, bridge)
+    if (currentBridge(projectId, mount.mountSeq) !== bridge) return
     const view = await loadDocument(projectId, mount, bridge)
     if (view === null) return
     logCanvas(
