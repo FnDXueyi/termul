@@ -32,6 +32,16 @@ export function sameCanvasDoc(a: string, b: string): boolean {
   return comparablePath(a) === comparablePath(b)
 }
 
+/** `docPath` relative to `root` with forward slashes; the absolute path when
+ * the document is not under the root. Drive-letter roots compare
+ * case-insensitively, as Windows paths do. */
+export function projectRelativePath(docPath: string, root: string | undefined): string {
+  const doc = plainPath(docPath)
+  if (!root) return doc
+  const prefix = `${plainPath(root).replace(/\/+$/, '')}/`
+  return comparablePath(doc).startsWith(comparablePath(prefix)) ? doc.slice(prefix.length) : doc
+}
+
 export function isCanvasDocPath(path: string): boolean {
   return path.toLowerCase().endsWith(CANVAS_DOC_EXTENSION)
 }

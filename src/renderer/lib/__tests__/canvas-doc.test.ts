@@ -6,7 +6,7 @@
 
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { describe, expect, it } from 'vitest'
-import { isCanvasDocPath, pickCanvasDoc, sameCanvasDoc } from '../canvas-doc'
+import { isCanvasDocPath, pickCanvasDoc, projectRelativePath, sameCanvasDoc } from '../canvas-doc'
 
 function entry(path: string, type: DirectoryEntry['type']): DirectoryEntry {
   const name = path.split('/').at(-1) ?? path
@@ -62,5 +62,32 @@ describe('sameCanvasDoc', () => {
 
   it('keeps POSIX paths case-sensitive', () => {
     expect(sameCanvasDoc('/proj/Design.figcraft', '/proj/design.figcraft')).toBe(false)
+  })
+})
+
+describe('projectRelativePath', () => {
+  it('strips the project root, folding case and separators for drive paths', () => {
+    expect(projectRelativePath('C:/p/design/app.figcraft', 'c:\\P\\')).toBe('design/app.figcraft')
+    expect(projectRelativePath('/home/u/p/a.figcraft', '/home/u/p')).toBe('a.figcraft')
+  })
+
+  it('treats a verbatim Windows root like its plain spelling, in any slash style', () => {
+    const root = String.raw`\\?\D:\Work\Proj`
+    expect(projectRelativePath('//?/d:/work/proj/design.figcraft', root)).toBe('design.figcraft')
+    expect(projectRelativePath(String.raw`\\?\D:\Work\Proj/a.figcraft`, 'd:/work/proj')).toBe(
+      'a.figcraft'
+    )
+    expect(projectRelativePath('D:/Work/Proj/sub/a.figcraft', root)).toBe('sub/a.figcraft')
+    expect(
+      projectRelativePath(String.raw`\\?\UNC\srv\share\p\a.figcraft`, String.raw`\\srv\share\p`)
+    ).toBe('a.figcraft')
+  })
+
+  it('keeps the full path for a document outside the root or with no root', () => {
+    expect(projectRelativePath('/home/u/other/a.figcraft', '/home/u/p')).toBe(
+      '/home/u/other/a.figcraft'
+    )
+    expect(projectRelativePath('/home/u/pp/a.figcraft', '/home/u/p')).toBe('/home/u/pp/a.figcraft')
+    expect(projectRelativePath('C:\\p\\a.figcraft', undefined)).toBe('C:/p/a.figcraft')
   })
 })
