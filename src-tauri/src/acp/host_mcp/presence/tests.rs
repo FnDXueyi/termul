@@ -368,6 +368,30 @@ async fn a_failed_lookup_moves_no_cursor() {
 }
 
 #[tokio::test]
+async fn a_call_answered_just_before_the_turn_ended_brings_no_guest_back() {
+    let (_router, presence, frames) = editor(|frame| {
+        (frame.method == "node.get").then(|| Ok(node_with_bounds(7, 0.0, 0.0).to_string()))
+    });
+    let create = json!({ "command": "node.create", "params": { "type": "rectangle" } });
+    presence.after_call(origin(), "create_node", EXECUTE, &create, r#"{"id":7}"#);
+    presence.hide(SESSION);
+    let seen = frames_within(&frames, Duration::from_millis(100)).await;
+    assert!(seen.is_empty(), "{seen:?}");
+    assert!(
+        presence.book.lock().guests.is_empty(),
+        "no guest outlives the turn"
+    );
+
+    presence.after_call(origin(), "create_node", EXECUTE, &create, r#"{"id":7}"#);
+    assert_eq!(next_frame(&frames).await.0.method, "node.get");
+    assert_eq!(
+        next_frame(&frames).await.0.method,
+        GUEST_CURSOR,
+        "the next turn shows again"
+    );
+}
+
+#[tokio::test]
 async fn nothing_mounted_means_no_presence_work() {
     let router = Arc::new(CanvasRouter::default());
     let presence = Presence::new(Arc::clone(router.mounts()));

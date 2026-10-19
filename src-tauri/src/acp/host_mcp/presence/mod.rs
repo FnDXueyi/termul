@@ -102,14 +102,45 @@ struct Shown {
     flash: Option<(Value, Duration)>,
 }
 
+/// A session's answered calls not yet offered, and how many times it was
+/// hidden since the oldest of them was handed off.
+#[derive(Default)]
+struct Handed {
+    calls: u32,
+    hides: u64,
+}
+
 /// Every guest, keyed by session id. Pure state: time comes in as `now`.
 #[derive(Default)]
 struct GuestBook {
     guests: HashMap<String, Guest>,
     epochs: u64,
+    handed: HashMap<String, Handed>,
 }
 
 impl GuestBook {
+    /// A call of `session_id` goes to its own task: the token its offer
+    /// presents, so a hide in between voids it.
+    fn hand_off(&mut self, session_id: &str) -> u64 {
+        let handed = self.handed.entry(session_id.to_string()).or_default();
+        handed.calls += 1;
+        handed.hides
+    }
+
+    /// The handed-off call presenting `token` arrived: whether no hide
+    /// happened since it was handed off.
+    fn arrive(&mut self, session_id: &str, token: u64) -> bool {
+        let Some(handed) = self.handed.get_mut(session_id) else {
+            return false;
+        };
+        let current = handed.hides == token;
+        handed.calls -= 1;
+        if handed.calls == 0 {
+            self.handed.remove(session_id);
+        }
+        current
+    }
+
     /// Queue `activity` as the guest's next move, replacing one not yet made.
     /// The epoch when a drain task must start for it.
     fn offer(&mut self, origin: CallOrigin<'_>, name: &str, activity: Activity) -> Option<u64> {
@@ -209,6 +240,9 @@ impl GuestBook {
 
     /// Drop the guest. Its canvas and the hide notice when it was ever shown.
     fn hide(&mut self, session_id: &str) -> Option<(String, Value)> {
+        if let Some(handed) = self.handed.get_mut(session_id) {
+            handed.hides += 1;
+        }
         let guest = self.guests.remove(session_id)?;
         guest.last_move?;
         Some((guest.project_id, json!({ "id": session_id })))
@@ -278,10 +312,9 @@ impl Presence {
         } else {
             String::new()
         };
+        let token = self.book.lock().hand_off(&session_id);
         runtime.spawn(async move {
-            let Some(activity) = derive_activity(&tool, &method, &params, &result) else {
-                return;
-            };
+            let activity = derive_activity(&tool, &method, &params, &result);
             let origin = CallOrigin {
                 session_id: &session_id,
                 agent_id: &agent_id,
@@ -293,7 +326,14 @@ impl Presence {
                 .get(origin.agent_id)
                 .cloned()
                 .unwrap_or_else(|| UNNAMED_AGENT.to_string());
-            let started = this.book.lock().offer(origin, &name, activity);
+            let started = {
+                let mut book = this.book.lock();
+                let current = book.arrive(&session_id, token);
+                match activity {
+                    Some(activity) if current => book.offer(origin, &name, activity),
+                    _ => None,
+                }
+            };
             if let Some(epoch) = started {
                 this.drain(session_id, epoch).await;
             }
