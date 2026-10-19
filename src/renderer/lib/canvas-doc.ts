@@ -19,11 +19,11 @@ export function plainPath(path: string): string {
     .replace(/^\/\/\?\//, '')
 }
 
-/** `plainPath`, folded to lower case for a drive-letter path, which Windows
- * compares without case. */
+/** `plainPath`, folded to lower case for a drive-letter or UNC path, which
+ * Windows compares without case. */
 export function comparablePath(path: string): string {
   const plain = plainPath(path)
-  return /^[A-Za-z]:/.test(plain) ? plain.toLowerCase() : plain
+  return /^([A-Za-z]:|\/\/)/.test(plain) ? plain.toLowerCase() : plain
 }
 
 /** Whether two spellings name the same document: the command palette and

@@ -6,7 +6,7 @@
 
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { describe, expect, it } from 'vitest'
-import { isCanvasDocPath, pickCanvasDoc } from '../canvas-doc'
+import { isCanvasDocPath, pickCanvasDoc, sameCanvasDoc } from '../canvas-doc'
 
 function entry(path: string, type: DirectoryEntry['type']): DirectoryEntry {
   const name = path.split('/').at(-1) ?? path
@@ -43,5 +43,24 @@ describe('isCanvasDocPath', () => {
     expect(isCanvasDocPath('C:/proj/design.figcraft')).toBe(true)
     expect(isCanvasDocPath('/proj/design.op')).toBe(false)
     expect(isCanvasDocPath('/proj/figcraft.md')).toBe(false)
+  })
+})
+
+describe('sameCanvasDoc', () => {
+  it('folds case for Windows paths, drive-letter and UNC alike', () => {
+    expect(sameCanvasDoc(String.raw`C:\Proj\Design.figcraft`, 'c:/proj/design.figcraft')).toBe(true)
+    expect(
+      sameCanvasDoc(String.raw`\\Server\Share\Design.figcraft`, '//server/share/design.figcraft')
+    ).toBe(true)
+    expect(
+      sameCanvasDoc(
+        String.raw`\\?\UNC\Server\Share\Design.figcraft`,
+        '//server/share/design.figcraft'
+      )
+    ).toBe(true)
+  })
+
+  it('keeps POSIX paths case-sensitive', () => {
+    expect(sameCanvasDoc('/proj/Design.figcraft', '/proj/design.figcraft')).toBe(false)
   })
 })
