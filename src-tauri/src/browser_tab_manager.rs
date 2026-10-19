@@ -72,9 +72,11 @@ impl BrowserTabManager {
         self.get_webview(tab_id)
     }
 
-    /// Build the tab's webview on `store` with the engine hooks installed
-    /// before its first navigation, then confirm the engine created it. A
-    /// webview the engine failed to build is closed and the tab refused.
+    /// Build the tab's webview on `store` with the builder hooks installed,
+    /// then confirm the engine created it and attach the adapter's own
+    /// hooks. Those come after the first navigation started, which is why
+    /// the core builds agent tabs at `about:blank`. A webview the engine
+    /// failed to build is closed and the tab refused.
     pub async fn create(
         &self,
         tab_id: String,

@@ -19,7 +19,9 @@ use super::ports::TabProfile;
 use super::BrowserError;
 use crate::browser_automation::engine::events::{CommitKind, NavVerdict};
 
+mod blank;
 mod popups;
+pub use blank::FirstLoad;
 pub use popups::PopupNote;
 #[cfg(test)]
 pub use popups::MAX_OPEN_POPUPS;
@@ -444,8 +446,8 @@ impl TabRegistry {
 
     /// Admit a renderer request to build `label`. The record exists from
     /// here on in `Creating`, so engine events from the first navigation
-    /// land on it. Returns the URL the webview must load.
-    pub fn begin_create(&mut self, label: &str, url: &str) -> Result<String, CreateRefusal> {
+    /// land on it. Returns how the webview loads its first page.
+    pub fn begin_create(&mut self, label: &str, url: &str) -> Result<FirstLoad, CreateRefusal> {
         let kind = parse_label(label).ok_or(CreateRefusal::Malformed)?;
         if self.tabs.contains_key(label) {
             return Err(CreateRefusal::AlreadyExists);
@@ -479,11 +481,11 @@ impl TabRegistry {
                     first_nav,
                 });
                 self.tabs.insert(label.to_string(), record);
-                return Ok(pending.url);
+                return Ok(FirstLoad::ViaBlank(pending.url));
             }
         };
         self.tabs.insert(label.to_string(), TabRecord::new(owner, &url, opened));
-        Ok(url)
+        Ok(FirstLoad::Direct(url))
     }
 
     /// The engine confirmed the webview: the tab goes live and a pending
