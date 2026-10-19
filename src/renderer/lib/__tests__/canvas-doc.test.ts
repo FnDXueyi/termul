@@ -6,7 +6,13 @@
 
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { describe, expect, it } from 'vitest'
-import { isCanvasDocPath, pickCanvasDoc, projectRelativePath, sameCanvasDoc } from '../canvas-doc'
+import {
+  canvasDocFile,
+  isCanvasDocPath,
+  pickCanvasDoc,
+  projectRelativePath,
+  sameCanvasDoc
+} from '../canvas-doc'
 
 function entry(path: string, type: DirectoryEntry['type']): DirectoryEntry {
   const name = path.split('/').at(-1) ?? path
@@ -89,5 +95,30 @@ describe('projectRelativePath', () => {
     )
     expect(projectRelativePath('/home/u/pp/a.figcraft', '/home/u/p')).toBe('/home/u/pp/a.figcraft')
     expect(projectRelativePath('C:\\p\\a.figcraft', undefined)).toBe('C:/p/a.figcraft')
+  })
+})
+
+describe('canvasDocFile', () => {
+  const project = { name: 'termul', path: 'D:/git/termul' }
+
+  it('names the file by its stem and reports the path save_file reports', () => {
+    expect(canvasDocFile(String.raw`\?\D:\git\termul\design.figcraft`, project)).toEqual({
+      name: 'design',
+      path: 'design.figcraft',
+      location: 'termul'
+    })
+    expect(canvasDocFile('D:/git/termul/ui/Poster.FIGCRAFT', project)).toMatchObject({
+      name: 'Poster',
+      path: 'ui/Poster.FIGCRAFT'
+    })
+  })
+
+  it('never hands the editor an absolute path', () => {
+    expect(canvasDocFile('E:/elsewhere/design.figcraft', project).path).toBe('design.figcraft')
+    expect(canvasDocFile('/home/u/p/design.figcraft', undefined)).toEqual({
+      name: 'design',
+      path: 'design.figcraft',
+      location: null
+    })
   })
 })

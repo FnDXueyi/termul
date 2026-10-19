@@ -4,6 +4,7 @@
  */
 
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
+import { basename } from './path-basename'
 
 export const CANVAS_DOC_EXTENSION = '.figcraft'
 
@@ -40,6 +41,29 @@ export function projectRelativePath(docPath: string, root: string | undefined): 
   if (!root) return doc
   const prefix = `${plainPath(root).replace(/\/+$/, '')}/`
   return comparablePath(doc).startsWith(comparablePath(prefix)) ? doc.slice(prefix.length) : doc
+}
+
+/** What `host.file` tells the editor about the file it holds: the header and
+ * window title show `name`, `inspect_*` report `path`, and `location` takes
+ * the place of figcraft's "Drafts". */
+export interface CanvasDocFile {
+  name: string
+  /** Project-relative, as `save_file` reports it; never an absolute path. */
+  path: string
+  location: string | null
+}
+
+export function canvasDocFile(
+  docPath: string,
+  project: { name: string; path?: string } | undefined
+): CanvasDocFile {
+  const file = basename(docPath)
+  const relative = projectRelativePath(docPath, project?.path)
+  return {
+    name: isCanvasDocPath(file) ? file.slice(0, -CANVAS_DOC_EXTENSION.length) : file,
+    path: relative === plainPath(docPath) ? file : relative,
+    location: project?.name ?? null
+  }
 }
 
 export function isCanvasDocPath(path: string): boolean {
