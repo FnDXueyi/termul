@@ -231,8 +231,10 @@ struct MountState {
     /// read. A write is checked against it, and a watcher event whose file
     /// still matches it is Termul's own write.
     disk: Option<Expected>,
-    /// Consecutive calls that timed out on this ready mount.
+    /// Consecutive stalls (calls that timed out) on this ready mount.
     timeouts: u32,
+    /// When the last counted timeout fired.
+    stall_counted_at: Option<tokio::time::Instant>,
     /// When the oldest edit no save was handed out for was reported; a save
     /// is due `autosave_max` after it however often edits supersede the
     /// debounce.
@@ -295,6 +297,7 @@ impl Mount {
                 link: Link::Unattached,
                 disk: None,
                 timeouts: 0,
+                stall_counted_at: None,
                 unsaved_wait_since: None,
             }),
             generation,
@@ -544,6 +547,7 @@ impl CanvasPersistence {
                 ..Persisted::default()
             });
             state.timeouts = 0;
+            state.stall_counted_at = None;
             state.unsaved_wait_since = None;
         }
         mount.bump_generation();
