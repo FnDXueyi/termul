@@ -152,6 +152,7 @@ import {
   setCachedSessionPayload
 } from '@/lib/acp-history-persistence'
 import { _resetAcpTransportForTests, AcpTransportError } from '@/lib/acp-transport'
+import { ACP_STREAM_INTERRUPT_MESSAGE } from '@/lib/agents/acp-spawn-errors'
 import { logFrontendError } from '@/lib/log-api'
 import {
   _resetAcpAuthForTesting,
@@ -215,7 +216,7 @@ describe('failed session lifecycle (story 5)', () => {
     // can retry, with the launch config recorded for the retry.
     expect(session.status).toBe('error')
     expect(session.launchConfigId).toBe('cfg-1')
-    expect(session.lastError).toContain('connection refused by agent')
+    expect(session.lastError).toContain(ACP_STREAM_INTERRUPT_MESSAGE)
     expect(state.launchingSessionIds[placeholderId]).toBeUndefined()
     // The sidebar projection gains a 'error'-status row instead of showing
     // "No chats yet" while the failed tab is open.

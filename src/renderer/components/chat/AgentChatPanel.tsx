@@ -6,6 +6,7 @@ import {
   overlayPendingLauncherOptions
 } from '@/components/agents/pending-launcher-options'
 import { MODEL_CATEGORY } from '@/components/chat/chat-input-bar-config'
+import { SkillFilesProvider } from '@/components/chat/skill-file-links'
 import { TermulMark } from '@/components/TermulMark'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
@@ -915,14 +916,16 @@ export function AgentChatPanel({
         forceCollapsed={compactDock}
       />
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <ChatMessageList
-          items={timeline}
-          sessionId={session.id}
-          showRunningIndicator={showRunningIndicator}
-          filePathContext={filePathContext}
-          onEditMessage={seedComposer}
-          onRetry={canOfferRetry ? handleRetry : undefined}
-        />
+        <SkillFilesProvider projectRoot={skillsProjectRoot}>
+          <ChatMessageList
+            items={timeline}
+            sessionId={session.id}
+            showRunningIndicator={showRunningIndicator}
+            filePathContext={filePathContext}
+            onEditMessage={seedComposer}
+            onRetry={canOfferRetry ? handleRetry : undefined}
+          />
+        </SkillFilesProvider>
         {/* Top-right status slot: floats over the transcript (clear of the
             scrollbar gutter) so status items take no layout height. */}
         <div className="pointer-events-none absolute right-4 top-3.5 z-20 flex items-center gap-1.5">
