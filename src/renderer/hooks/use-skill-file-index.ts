@@ -23,7 +23,9 @@ export function skillIndexKey(name: string): string {
   return name.trim().toLowerCase()
 }
 
-async function fetchIndex(projectRoot: string | undefined): Promise<SkillFileIndex> {
+async function fetchIndex(
+  projectRoot: string | undefined
+): Promise<{ index: SkillFileIndex; ok: boolean }> {
   try {
     const entries = await skillsApi.listSkillFiles(projectRoot)
     const index = new Map<string, string>()
@@ -31,15 +33,14 @@ async function fetchIndex(projectRoot: string | undefined): Promise<SkillFileInd
       const key = skillIndexKey(entry.name)
       if (key && !index.has(key)) index.set(key, entry.path)
     }
-    return index
+    return { index, ok: true }
   } catch (err) {
-    cache.delete(projectRoot ?? '')
     void logFrontendError({
       level: 'warn',
       source: 'useSkillFileIndex',
       message: `Failed to index skill files: ${err instanceof Error ? err.message : String(err)}`
     })
-    return EMPTY_INDEX
+    return { index: EMPTY_INDEX, ok: false }
   }
 }
 
@@ -48,7 +49,11 @@ export function loadSkillFileIndex(projectRoot: string | undefined): Promise<Ski
   const key = projectRoot ?? ''
   const cached = cache.get(key)
   if (cached && Date.now() - cached.fetchedAt < INDEX_TTL_MS) return cached.index
-  const index = fetchIndex(projectRoot)
+  // A failed load evicts only its own entry: a newer load may already own the key.
+  const index: Promise<SkillFileIndex> = fetchIndex(projectRoot).then((result) => {
+    if (!result.ok && cache.get(key)?.index === index) cache.delete(key)
+    return result.index
+  })
   cache.set(key, { fetchedAt: Date.now(), index })
   return index
 }

@@ -56,6 +56,31 @@ describe('useSkillFileIndex', () => {
     expect(listSkillFilesRef.current).toHaveBeenCalledTimes(2)
   })
 
+  it('does not let a late failure evict a newer load for the same root', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
+    let failFirst: (err: Error) => void = () => {}
+    listSkillFilesRef.current = vi.fn(
+      () =>
+        new Promise((_, reject) => {
+          failFirst = reject
+        })
+    )
+    const first = loadSkillFileIndex('/p')
+
+    now.mockReturnValue(1_000 + 60_000)
+    listSkillFilesRef.current = vi.fn(async () => [
+      { name: 'forge-idea', path: '/p/.claude/skills/forge-idea/SKILL.md' }
+    ])
+    const second = loadSkillFileIndex('/p')
+    expect((await second).size).toBe(1)
+
+    failFirst(new Error('boom'))
+    expect((await first).size).toBe(0)
+
+    expect(loadSkillFileIndex('/p')).toBe(second)
+    now.mockRestore()
+  })
+
   it('returns an empty index for a new root until its load resolves', async () => {
     const { result, rerender } = renderHook(({ root }) => useSkillFileIndex(root), {
       initialProps: { root: '/p' }
