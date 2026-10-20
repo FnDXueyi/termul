@@ -535,8 +535,10 @@ async fn shared_live_requires_the_token_while_a_browser_host_is_registered() {
     let _ = state.stop().await;
 }
 
+/// A gated host answers by any name a phone may use (tunnel, LAN, MagicDNS):
+/// the token, not the `Host`, is what a rebinding page cannot present.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shared_live_serves_its_tunnel_host_and_rejects_foreign_hosts() {
+async fn a_gated_shared_live_host_serves_any_host_name_and_still_needs_the_token() {
     let (acp, pty, relay, registry) = lifecycle_fixtures();
     let (data, data_dir) = shared_live_fixture();
     let state = RemoteServerState::new();
@@ -548,7 +550,7 @@ async fn shared_live_serves_its_tunnel_host_and_rejects_foreign_hosts() {
             registry,
             RemoteBindMode::Localhost,
             true,
-            false,
+            true,
             &data,
             None,
             None,
@@ -557,27 +559,40 @@ async fn shared_live_serves_its_tunnel_host_and_rejects_foreign_hosts() {
         .expect("start with a planned tunnel");
     let api = format!("{}/projects", status.url.expect("loopback url"));
     let token = persisted_token(data_dir.path());
-    let tunnel_host = "rebind-check.trycloudflare.com";
 
-    assert_eq!(
-        http_status_with_host(&api, tunnel_host, Some(&token)).await,
-        reqwest::StatusCode::FORBIDDEN,
-        "the tunnel host is not served before the tunnel attaches"
-    );
-    let child = long_lived_command().spawn().expect("spawn child");
-    state
-        .attach_tunnel(format!("https://{tunnel_host}"), child)
-        .expect("attach");
-    assert_eq!(
-        http_status_with_host(&api, tunnel_host, Some(&token)).await,
-        reqwest::StatusCode::OK
-    );
-    assert_eq!(
-        http_status_with_host(&api, "attacker.example", Some(&token)).await,
-        reqwest::StatusCode::FORBIDDEN,
-        "a rebinding host is refused even with the token"
-    );
+    let mut seen = Vec::new();
+    for host in [
+        "rebind-check.trycloudflare.com",
+        "my-pc.local",
+        "desk.tailnet-1234.ts.net",
+    ] {
+        seen.push((
+            host,
+            http_status_with_host(&api, host, Some(&token)).await,
+            http_status_with_host(&api, host, None).await,
+        ));
+    }
     let _ = state.stop().await;
+    assert_eq!(
+        seen,
+        [
+            (
+                "rebind-check.trycloudflare.com",
+                reqwest::StatusCode::OK,
+                reqwest::StatusCode::UNAUTHORIZED
+            ),
+            (
+                "my-pc.local",
+                reqwest::StatusCode::OK,
+                reqwest::StatusCode::UNAUTHORIZED
+            ),
+            (
+                "desk.tailnet-1234.ts.net",
+                reqwest::StatusCode::OK,
+                reqwest::StatusCode::UNAUTHORIZED
+            ),
+        ]
+    );
 }
 
 /// Read the persisted bearer token the host generated under `data_dir`.
@@ -682,6 +697,11 @@ async fn shared_live_on_loopback_without_a_tunnel_is_ungated_and_writes_no_token
         .expect("start");
     let api = format!("{}/projects", status.url.expect("loopback url"));
     assert_eq!(http_status(&api, None).await, reqwest::StatusCode::OK);
+    assert_eq!(
+        http_status_with_host(&api, "my-pc.local", None).await,
+        reqwest::StatusCode::FORBIDDEN,
+        "an ungated host serves loopback names only"
+    );
     assert!(
         !data_dir
             .path()

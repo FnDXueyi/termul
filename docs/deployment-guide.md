@@ -206,7 +206,7 @@ Comma-separate several origins, or repeat `--allowed-origins`. The flag replaces
 
 A server that runs without a bearer token also checks the `Host` header, so a DNS-rebinding page cannot reach it. It answers IP literals, `localhost`, and the hosts of `--allowed-origins`, and returns `403` for any other name. To reach a token-less server by a host name, such as a proxy that keeps the public `Host` header, list that origin with `--allowed-origins`. A server that requires the token accepts any `Host`, because a rebinding page cannot present the token.
 
-The desktop app talks to the host through Tauri IPC, not these HTTP or WebSocket routes. The desktop shared-live server uses the same origin check. Browser clients of that server are served by it, so they match the request host. It always requires its token, and it answers only IP literals, `localhost`, and its cloudflared tunnel host.
+The desktop app talks to the host through Tauri IPC, not these HTTP or WebSocket routes. The desktop shared-live server uses the same origin check. Browser clients of that server are served by it, so they match the request host. It always requires its token, so like a gated standalone server it answers any `Host` (its cloudflared tunnel host, a LAN or MagicDNS name, a reverse proxy name).
 
 ## Run in Docker
 

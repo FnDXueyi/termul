@@ -7,20 +7,19 @@
 //!
 //! - IP literals, because rebinding needs a hostname;
 //! - `localhost`;
-//! - names given at startup (the hosts of `--allowed-origins`) or added at
-//!   runtime (the shared-live tunnel hostname).
+//! - names given at startup (the hosts of `--allowed-origins`).
 //!
-//! A standalone server that requires its bearer token accepts any `Host`
-//! ([`HostAllowList::any`]): a rebinding page cannot present the token, and
-//! reverse proxies and container networks forward names the server cannot
-//! know in advance.
+//! A server that requires its bearer token (the standalone server, or the
+//! desktop shared-live host) accepts any `Host` ([`HostAllowList::any`]): a
+//! rebinding page cannot present the token, and reverse proxies, tunnels and
+//! LAN names forward hosts the server cannot know in advance.
 //!
 //! A request without `Host` passes. Browsers always send one, so its absence
 //! means a non-browser client, which rebinding cannot produce.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -30,11 +29,10 @@ use axum::Json;
 
 use super::origin::{split_host_port, OriginPolicy};
 
-/// Extra host names a listener serves. Clones share one list, so a name
-/// added after the listener started applies to it.
+/// Extra host names a listener serves.
 #[derive(Debug, Clone, Default)]
 pub struct HostAllowList {
-    names: Arc<RwLock<BTreeSet<String>>>,
+    names: Arc<BTreeSet<String>>,
     any: bool,
 }
 
@@ -55,20 +53,13 @@ impl HostAllowList {
 
     /// Loopback names plus the hosts of the operator's extra origins.
     pub fn from_origins(policy: &OriginPolicy) -> Self {
-        let list = Self::default();
-        for host in policy.hosts() {
-            list.allow(&host);
-        }
-        list
-    }
-
-    /// Accept `host` (a bare host name, any case, no port) from now on.
-    pub fn allow(&self, host: &str) {
-        if let Some((name, _)) = split_host_port(host) {
-            self.names
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(name);
+        let names = policy
+            .hosts()
+            .filter_map(|host| split_host_port(&host).map(|(name, _)| name))
+            .collect();
+        Self {
+            names: Arc::new(names),
+            any: false,
         }
     }
 
@@ -86,11 +77,7 @@ impl HostAllowList {
         };
         host == "localhost"
             || host.parse::<IpAddr>().is_ok()
-            || self
-                .names
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&host)
+            || self.names.contains(&host)
     }
 
     /// For listeners that parse HTTP by hand: read the header lines that

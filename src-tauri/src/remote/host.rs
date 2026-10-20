@@ -118,14 +118,6 @@ pub fn shared_live_requires_token(
     tunnel_planned || bind_mode.is_lan_exposed() || browser_host_registered
 }
 
-/// Host name of the tunnel's public URL, as cloudflared forwards it in `Host`.
-fn tunnel_host(url: &str) -> Option<String> {
-    tauri::Url::parse(url)
-        .ok()?
-        .host_str()
-        .map(str::to_owned)
-}
-
 /// Durable inputs the desktop hands the shared-live host (AD-14).
 #[derive(Clone)]
 pub struct SharedLiveData {
@@ -232,8 +224,6 @@ struct RemoteServer {
     /// is reaped via `kill_on_drop` — the child is NOT held here directly,
     /// which keeps `status()` sync (no try_wait-across-`.await` dance).
     tunnel_watchdog: Option<tokio::task::JoinHandle<()>>,
-    /// The router's `Host` allow-list; the tunnel hostname joins it on attach.
-    host_allow: HostAllowList,
 }
 
 impl RemoteServer {
@@ -421,7 +411,16 @@ impl RemoteServerState {
             info!("Shared-live web server shutting down…");
         };
 
-        let host_allow = HostAllowList::loopback();
+        // A gated host serves any `Host`, as the token-gated standalone server
+        // does: a rebinding page cannot present the token, and phones reach
+        // the host by LAN, MagicDNS or tunnel names it cannot know in advance.
+        // An ungated host stays on loopback names, so a tunnel attached to it
+        // is refused.
+        let host_allow = if web_auth.is_some() {
+            HostAllowList::any()
+        } else {
+            HostAllowList::loopback()
+        };
         let (addr, serve_handle) = serve_router(
             acp,
             Arc::clone(&pty),
@@ -432,7 +431,7 @@ impl RemoteServerState {
             ws_relay,
             registry,
             cfg,
-            host_allow.clone(),
+            host_allow,
             shutdown,
             acp_catalog,
             acp_install,
@@ -477,7 +476,6 @@ impl RemoteServerState {
             web_auth,
             tunnel_dead: None,
             tunnel_watchdog: None,
-            host_allow,
         });
         Ok(status)
     }
@@ -596,11 +594,6 @@ impl RemoteServerState {
                     let _ = child.wait().await;
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 });
-                // cloudflared forwards the public hostname as `Host`.
-                match tunnel_host(&url) {
-                    Some(host) => server.host_allow.allow(&host),
-                    None => warn!("Shared-live tunnel URL has no host; tunnel requests will be rejected"),
-                }
                 server.tunnel_url = Some(url);
                 server.tunnel_dead = Some(dead_flag);
                 server.tunnel_watchdog = Some(watchdog);
