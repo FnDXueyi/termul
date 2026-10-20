@@ -15,19 +15,32 @@ use crate::commands::browser_policy::{
 
 const LOOPBACK: &str = "127.0.0.1:50000";
 const LAN: &str = "192.168.1.9:50000";
+const OPEN: WriteFlags = WriteFlags {
+    allow_remote_writes: false,
+    shared_live_writes_denied: false,
+};
 
 #[derive(Clone, Copy, Default)]
 struct Client {
     peer: Option<&'static str>,
     bearer: bool,
-    bound: Option<&'static str>,
 }
 
 fn router(service: Option<Arc<BrowserPolicyService>>, token_gated: bool, peer: &str) -> Router {
+    router_with_flags(service, token_gated, peer, OPEN)
+}
+
+fn router_with_flags(
+    service: Option<Arc<BrowserPolicyService>>,
+    token_gated: bool,
+    peer: &str,
+    write_flags: WriteFlags,
+) -> Router {
     let peer: SocketAddr = peer.parse().unwrap();
     browser_policy_router::<()>(PolicyRouteState {
         service,
         token_gated,
+        write_flags,
     })
     .layer(MockConnectInfo(peer))
 }
@@ -48,11 +61,6 @@ async fn send(
     if client.bearer {
         request.extensions_mut().insert(BearerVerified);
     }
-    if let Some(project) = client.bound {
-        request
-            .extensions_mut()
-            .insert(BoundProject(project.to_string()));
-    }
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(
         response.status(),
@@ -63,12 +71,6 @@ async fn send(
         .await
         .unwrap();
     serde_json::from_slice(&bytes).unwrap()
-}
-
-fn caller_of(client: Client) -> CallerScope {
-    client
-        .bound
-        .map_or(CallerScope::App, |p| CallerScope::Project(p.to_string()))
 }
 
 enum Step {
@@ -86,8 +88,8 @@ enum Step {
 }
 
 /// Run one step over the Tauri command functions.
-async fn via_command(service: &BrowserPolicyService, step: &Step, client: Client) -> Value {
-    let caller = caller_of(client);
+async fn via_command(service: &BrowserPolicyService, step: &Step) -> Value {
+    let caller = CallerScope::App;
     match step {
         Step::GetProject(id) => {
             serde_json::to_value(get_project_policy(service, &caller, id).await)
@@ -282,52 +284,17 @@ async fn the_command_and_the_route_return_identical_bodies_for_the_same_operatio
             },
             admin(),
         ),
-        (
-            Step::GetApp,
-            Client {
-                bound: Some("p1"),
-                bearer: true,
-                ..Client::default()
-            },
-        ),
-        (
-            Step::App {
-                revision: 3,
-                op: json!({"op": "clear_global_profile"}),
-            },
-            Client {
-                bound: Some("p1"),
-                bearer: true,
-                ..Client::default()
-            },
-        ),
-        (
-            Step::GetProject("p2"),
-            Client {
-                bound: Some("p1"),
-                bearer: true,
-                ..Client::default()
-            },
-        ),
-        (
-            Step::GetProject("p1"),
-            Client {
-                bound: Some("p1"),
-                bearer: true,
-                ..Client::default()
-            },
-        ),
     ];
 
     let mut successes = 0;
     for (index, (step, client)) in steps.iter().enumerate() {
-        let from_command = via_command(&command_side.service, step, *client).await;
+        let from_command = via_command(&command_side.service, step).await;
         let from_route = via_route(&route_side.service, step, *client).await;
         assert_eq!(from_command, from_route, "step {index} diverged");
         successes += usize::from(from_command["success"] == true);
     }
     assert_eq!(
-        successes, 13,
+        successes, 12,
         "the scripted sequence mixes successes and refusals"
     );
     assert_eq!(
@@ -342,15 +309,12 @@ async fn a_route_refusal_carries_the_reason_and_the_frozen_code() {
     let f = fixture(dir.path(), vec![]);
     let body = via_route(
         &f.service,
-        &Step::App {
+        &Step::Project {
+            id: "../etc",
             revision: 0,
-            op: json!({"op": "set_global_profile", "enabled": false}),
+            op: json!({"op": "set_ephemeral", "ephemeral": true}),
         },
-        Client {
-            bound: Some("p1"),
-            bearer: true,
-            ..Client::default()
-        },
+        admin(),
     )
     .await;
     assert_eq!(body["success"], false);
@@ -358,7 +322,137 @@ async fn a_route_refusal_carries_the_reason_and_the_frozen_code() {
     assert!(body["error"]
         .as_str()
         .unwrap()
-        .starts_with("app_scope_required: "));
+        .starts_with("invalid_project_id: "));
+}
+
+const SHARED_LIVE: WriteFlags = WriteFlags {
+    allow_remote_writes: false,
+    shared_live_writes_denied: true,
+};
+
+async fn edit_app(app: Router) -> Value {
+    send(
+        app,
+        Method::POST,
+        "/host/browser-policy/app",
+        Some(json!({"expectedRevision": 0, "op": {"op": "set_global_profile", "enabled": false}})),
+        admin(),
+    )
+    .await
+}
+
+async fn edit_project(app: Router) -> Value {
+    send(
+        app,
+        Method::POST,
+        "/host/browser-policy/project",
+        Some(json!({"projectId": "p1", "expectedRevision": 0, "op": {"op": "add_origin", "origin": "https://*.evil.example"}})),
+        admin(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn policy_edits_take_the_remote_write_guard_and_reads_do_not() {
+    let cases = [
+        (LAN, OPEN, false),
+        (LOOPBACK, SHARED_LIVE, false),
+        (LAN, SHARED_LIVE, false),
+        (
+            LAN,
+            WriteFlags {
+                allow_remote_writes: true,
+                shared_live_writes_denied: false,
+            },
+            true,
+        ),
+        (LOOPBACK, OPEN, true),
+    ];
+    for (peer, flags, admitted) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let f = fixture_with_profile(dir.path(), vec![], ScriptedProfile::succeeding());
+        let app = || router_with_flags(Some(f.service.clone()), true, peer, flags);
+        let edits = [edit_project(app()).await, edit_app(app()).await];
+        let read = send(app(), Method::GET, "/host/browser-policy/app", None, admin()).await;
+        let outcome = json!([
+            edits[0]["code"],
+            edits[1]["code"],
+            read["success"],
+            f.sink.payloads_of("acp:browser_policy_changed").len(),
+        ]);
+        let expected = if admitted {
+            json!([null, null, true, 2])
+        } else {
+            json!(["FORBIDDEN", "FORBIDDEN", true, 0])
+        };
+        assert_eq!(outcome, expected, "peer={peer} flags={flags:?}");
+    }
+}
+
+fn host_router(shared_live_writes_denied: bool, dir: &std::path::Path) -> Router {
+    let auth = Arc::new(crate::web::auth::WebAuth::new(
+        crate::web::auth::WebAuthToken::new("policy-token").unwrap(),
+    ));
+    crate::web::router::router_with_static(
+        Arc::new(crate::acp::AcpManager::new(vec![])),
+        crate::web::test_pty_manager(),
+        Arc::new(crate::web::sink::WsRelaySink::new()),
+        Arc::new(crate::web::project_registry::ProjectRegistry::new()),
+        dir,
+        false,
+        shared_live_writes_denied,
+        Some(auth),
+        crate::web::origin::OriginPolicy::default(),
+    )
+}
+
+async fn through_host(app: Router, method: Method, uri: &str, token: &str) -> (u16, Value) {
+    let peer: SocketAddr = LOOPBACK.parse().unwrap();
+    let body = (method == Method::POST).then(|| {
+        json!({"expectedRevision": 0, "op": {"op": "set_global_profile", "enabled": false}})
+            .to_string()
+    });
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("host", "127.0.0.1")
+        .header("authorization", format!("Bearer {token}"))
+        .extension(axum::extract::ConnectInfo(peer))
+        .body(body.map_or_else(Body::empty, Body::from))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+/// Through the real host stack (bearer gate, origin and host checks): the
+/// shared-live host refuses a token holder's edit before the policy service
+/// is consulted, while its read and a local host's edit reach the service.
+/// No service is installed in the test process, so reaching it reads
+/// `capability_unavailable`.
+#[tokio::test]
+async fn the_shared_live_stack_refuses_policy_edits_from_a_token_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = "/host/browser-policy/app";
+    let cases = [
+        (true, Method::POST, "policy-token", (200, json!("FORBIDDEN"))),
+        (true, Method::POST, "wrong", (401, json!("UNAUTHORIZED"))),
+        (true, Method::GET, "policy-token", (200, json!("capability_unavailable"))),
+        (false, Method::POST, "policy-token", (200, json!("capability_unavailable"))),
+    ];
+    for (shared_live, method, token, expected) in cases {
+        let (status, body) =
+            through_host(host_router(shared_live, dir.path()), method.clone(), app, token).await;
+        assert_eq!(
+            (status, body["code"].clone()),
+            expected,
+            "shared_live={shared_live} {method} token={token}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -9,10 +9,13 @@
 //! - `POST /host/browser-policy/project` `{projectId, expectedRevision, op}`
 //!
 //! The `/host/` prefix is bearer-gated whenever the host runs a token gate.
-//! A request that passed the gate holds app scope. A client bound to one
-//! project carries a [`BoundProject`] request extension (set by whatever
-//! authenticates project-bound clients) and is refused app-level operations
-//! with `app_scope_required`. Without a gate only loopback peers are served.
+//! The only credential a host issues is its web token, so a request that
+//! passed the gate holds app scope. Without a gate only loopback peers are
+//! served. The `POST` routes are host-state writes and take the shared
+//! remote-write guard (`check_local_only`): a non-loopback peer needs
+//! `--allow-remote-writes`, and the desktop shared-live host refuses every
+//! edit, because a tunnel forwards public traffic from loopback and a leaked
+//! token must not widen the allow-list or pre-approve prompts away.
 //! A host with no policy service (`termul-server`) answers
 //! `capability_unavailable`.
 
@@ -31,11 +34,8 @@ use crate::acp::browser_policy::{
     AppPolicyView, BrowserPolicyService, CallerScope, PolicyRefusal, ProjectPolicyView,
 };
 use crate::web::auth::BearerVerified;
-use crate::web::fs_api::IpcBody;
-
-/// Request extension marking a client bound to a single project.
-#[derive(Debug, Clone)]
-pub struct BoundProject(pub String);
+use crate::web::capabilities::WriteFlags;
+use crate::web::fs_api::{check_local_only, IpcBody};
 
 #[derive(Clone)]
 pub struct PolicyRouteState {
@@ -44,15 +44,18 @@ pub struct PolicyRouteState {
     /// Whether the host runs a bearer-token gate. Without one only loopback
     /// peers are served.
     pub token_gated: bool,
+    /// Deployment flags for the shared remote-write guard on the `POST`
+    /// routes.
+    pub write_flags: WriteFlags,
 }
+
+const APP_ROUTE: &str = "/host/browser-policy/app";
+const PROJECT_ROUTE: &str = "/host/browser-policy/project";
 
 pub fn browser_policy_router<S>(state: PolicyRouteState) -> Router<S> {
     Router::new()
-        .route("/host/browser-policy/app", get(get_app).post(apply_app))
-        .route(
-            "/host/browser-policy/project",
-            get(get_project).post(apply_project),
-        )
+        .route(APP_ROUTE, get(get_app).post(apply_app))
+        .route(PROJECT_ROUTE, get(get_project).post(apply_project))
         .with_state(state)
 }
 
@@ -67,15 +70,14 @@ fn refuse<T>(refusal: PolicyRefusal) -> Json<IpcBody<T>> {
     body(Err(refusal))
 }
 
-/// Who is calling: the service plus the scope this request holds.
+/// The service, once the caller is admitted. `write_route` names a `POST`
+/// route, which also has to pass the remote-write guard.
 fn caller<T>(
     state: &PolicyRouteState,
     parts: &Parts,
     peer: SocketAddr,
-) -> Result<(Arc<BrowserPolicyService>, CallerScope), Json<IpcBody<T>>> {
-    let Some(service) = state.service.clone() else {
-        return Err(refuse(PolicyRefusal::StoreUnavailable));
-    };
+    write_route: Option<&str>,
+) -> Result<Arc<BrowserPolicyService>, Json<IpcBody<T>>> {
     let admitted = parts.extensions.get::<BearerVerified>().is_some()
         || (!state.token_gated && peer.ip().is_loopback());
     if !admitted {
@@ -89,11 +91,20 @@ fn caller<T>(
             "FORBIDDEN",
         )));
     }
-    let scope = match parts.extensions.get::<BoundProject>() {
-        Some(BoundProject(project_id)) => CallerScope::Project(project_id.clone()),
-        None => CallerScope::App,
-    };
-    Ok((service, scope))
+    if let Some(route) = write_route {
+        if let Some(forbidden) = check_local_only::<T>(
+            peer,
+            state.write_flags.allow_remote_writes,
+            state.write_flags.shared_live_writes_denied,
+            route,
+        ) {
+            return Err(Json(forbidden));
+        }
+    }
+    state
+        .service
+        .clone()
+        .ok_or_else(|| refuse(PolicyRefusal::StoreUnavailable))
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,8 +134,8 @@ async fn get_app(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     parts: Parts,
 ) -> Json<IpcBody<AppPolicyView>> {
-    match caller(&state, &parts, peer) {
-        Ok((service, scope)) => body(service.app_view(&scope).await),
+    match caller(&state, &parts, peer, None) {
+        Ok(service) => body(service.app_view(&CallerScope::App).await),
         Err(refused) => refused,
     }
 }
@@ -135,14 +146,14 @@ async fn apply_app(
     parts: Parts,
     request: Result<Json<ApplyAppBody>, JsonRejection>,
 ) -> Json<IpcBody<AppPolicyView>> {
-    let (service, scope) = match caller(&state, &parts, peer) {
-        Ok(caller) => caller,
+    let service = match caller(&state, &parts, peer, Some(APP_ROUTE)) {
+        Ok(service) => service,
         Err(refused) => return refused,
     };
     match request {
         Ok(Json(request)) => body(
             service
-                .apply_app(&scope, request.expected_revision, &request.op)
+                .apply_app(&CallerScope::App, request.expected_revision, &request.op)
                 .await,
         ),
         Err(_) => refuse(PolicyRefusal::MalformedOperation),
@@ -155,8 +166,12 @@ async fn get_project(
     parts: Parts,
     Query(query): Query<ProjectQuery>,
 ) -> Json<IpcBody<ProjectPolicyView>> {
-    match caller(&state, &parts, peer) {
-        Ok((service, scope)) => body(service.project_view(&scope, &query.project_id).await),
+    match caller(&state, &parts, peer, None) {
+        Ok(service) => body(
+            service
+                .project_view(&CallerScope::App, &query.project_id)
+                .await,
+        ),
         Err(refused) => refused,
     }
 }
@@ -167,15 +182,15 @@ async fn apply_project(
     parts: Parts,
     request: Result<Json<ApplyProjectBody>, JsonRejection>,
 ) -> Json<IpcBody<ProjectPolicyView>> {
-    let (service, scope) = match caller(&state, &parts, peer) {
-        Ok(caller) => caller,
+    let service = match caller(&state, &parts, peer, Some(PROJECT_ROUTE)) {
+        Ok(service) => service,
         Err(refused) => return refused,
     };
     match request {
         Ok(Json(request)) => body(
             service
                 .apply_project(
-                    &scope,
+                    &CallerScope::App,
                     &request.project_id,
                     request.expected_revision,
                     &request.op,

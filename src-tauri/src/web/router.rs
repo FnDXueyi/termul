@@ -346,6 +346,10 @@ pub fn router(
             crate::web::browser_policy_api::PolicyRouteState {
                 service: crate::acp::browser_policy::installed(),
                 token_gated: web_auth.is_some(),
+                write_flags: crate::web::capabilities::WriteFlags {
+                    allow_remote_writes,
+                    shared_live_writes_denied,
+                },
             },
         ))
         // Canvas web routes: open/close/persistence (IpcBody) and the
@@ -642,6 +646,10 @@ pub fn router_with_static(
             crate::web::browser_policy_api::PolicyRouteState {
                 service: crate::acp::browser_policy::installed(),
                 token_gated: web_auth.is_some(),
+                write_flags: crate::web::capabilities::WriteFlags {
+                    allow_remote_writes,
+                    shared_live_writes_denied,
+                },
             },
         ))
         .merge(crate::web::canvas_api::canvas_router(
