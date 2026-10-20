@@ -84,9 +84,8 @@ if ! bun run test > "$WT/vitest-branch.txt" 2>&1; then
   ( cd "$REPO/.wt/finish-baseline" \
       && [ -e node_modules ] || ln -s "$REPO/node_modules" node_modules \
       && bun vitest run > "$WT/vitest-baseline.txt" 2>&1 ) || true
-  NEW=$(comm -13 \
-    <(grep -oE "^ *(×|FAIL) .*" "$WT/vitest-baseline.txt" 2>/dev/null | sort -u) \
-    <(grep -oE "^ *(×|FAIL) .*" "$WT/vitest-branch.txt" | sort -u) || true)
+  strip () { grep -oE "^ *(×|FAIL) .*" "$1" 2>/dev/null | sed -E 's/ +[0-9.]+m?s$//' | sort -u; }
+  NEW=$(comm -13 <(strip "$WT/vitest-baseline.txt") <(strip "$WT/vitest-branch.txt") || true)
   if [ -n "$NEW" ]; then
     echo "$NEW" | tee -a "$LOG"
     tail -40 "$WT/vitest-branch.txt" >> "$LOG"
