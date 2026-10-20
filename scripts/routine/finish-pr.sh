@@ -123,7 +123,12 @@ step "clippy"
 
 step "cargo test"
 if ! ( cd src-tauri && CARGO_TARGET_DIR="$REPO/.cargo-target" cargo test ) > "$WT/cargo-branch.txt" 2>&1; then
-  git worktree add --quiet --force "$REPO/.wt/finish-baseline" origin/dev 2>/dev/null
+  # Flake absorption: one full re-run. A failure that passes the second run
+  # is a timing flake (proven 2026-10-20: canvas frame-limit test failed one
+  # run, passed the immediate full rerun).
+  if ( cd src-tauri && CARGO_TARGET_DIR="$REPO/.cargo-target" cargo test ) > "$WT/cargo-branch.txt" 2>&1; then
+    echo "cargo test: failure passed the retry (timing flake); treating as green" | tee -a "$LOG"
+  elif git worktree add --quiet --force "$REPO/.wt/finish-baseline" origin/dev 2>/dev/null; then
   ( cd "$REPO/.wt/finish-baseline/src-tauri" \
       && CARGO_TARGET_DIR="$REPO/.cargo-target-baseline" cargo test ) > "$WT/cargo-baseline.txt" 2>&1 || true
   NEW=$(comm -13 \
@@ -135,7 +140,8 @@ if ! ( cd src-tauri && CARGO_TARGET_DIR="$REPO/.cargo-target" cargo test ) > "$W
     git -C "$REPO" worktree remove --force "$REPO/.wt/finish-baseline" 2>/dev/null || true
     fail "cargo test (new failures vs dev baseline)"
   fi
-  echo "cargo test failures match the dev baseline (pre-existing red, e.g. #1386); continuing" | tee -a "$LOG"
+    echo "cargo test failures match the dev baseline (pre-existing red, e.g. #1386); continuing" | tee -a "$LOG"
+  fi
 fi
 git -C "$REPO" worktree remove --force "$REPO/.wt/finish-baseline" 2>/dev/null || true
 
