@@ -69,8 +69,12 @@ fi
 [ -d node_modules ] || ln -s "$REPO/node_modules" node_modules
 ( cd src-tauri && [ -d node_modules ] || ln -s "$REPO/node_modules" node_modules ) 2>/dev/null
 
-step "biome ci"
-bun run ci >> "$LOG" 2>&1 || { tail -40 "$LOG"; fail "bun run ci"; }
+step "biome (branch files only)"
+# Dev tip carries unformatted files; gate only the files this branch touches.
+CHANGED=$(git diff --name-only origin/dev...HEAD | grep -E "\.(ts|tsx|js|jsx|mjs|cjs)$" || true)
+if [ -n "$CHANGED" ]; then
+  bunx biome check $CHANGED >> "$LOG" 2>&1 || { tail -40 "$LOG"; fail "biome check (branch files)"; }
+fi
 
 step "typecheck"
 bun run typecheck >> "$LOG" 2>&1 || { tail -40 "$LOG"; fail "bun run typecheck"; }
