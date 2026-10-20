@@ -143,11 +143,7 @@ impl BrowserTabManager {
                     "#
                 );
                 builder = builder.initialization_script(&init_script);
-                log::info!(
-                    "[BrowserTab] Agentation init script set for tab={} endpoint={}",
-                    tab_id,
-                    endpoint_url
-                );
+                log::info!("[BrowserTab] Agentation init script set for tab={tab_id}");
             }
         }
 

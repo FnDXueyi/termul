@@ -1410,14 +1410,10 @@ pub fn run() {
                 let db_path = agentation::db_path(&app_data);
                 match tauri::async_runtime::block_on(agentation::AgentationService::start(&db_path)) {
                     Ok(service) => {
-                        let port = service.http_port();
-                        let endpoint = format!("http://127.0.0.1:{port}");
-
-                        // Wire the endpoint into the browser tab manager
                         if let Some(bt_manager) =
                             app.try_state::<Arc<browser_tab_manager::BrowserTabManager>>()
                         {
-                            bt_manager.set_agentation_endpoint(endpoint);
+                            bt_manager.set_agentation_endpoint(service.endpoint().to_string());
                         }
 
                         app.manage(service);
