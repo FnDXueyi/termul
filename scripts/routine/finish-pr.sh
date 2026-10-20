@@ -53,6 +53,17 @@ git -C "$REPO" worktree add --quiet --force "$WT" "origin/$BRANCH" 2>/dev/null |
 }
 cd "$WT" || exit 2
 
+# Rebase onto current dev first: claim branches are cut hours earlier and
+# pre-existing dev flakes must not fail the gate. A clean rebase also keeps
+# the PR mergeable. Conflicts abort the gate with a clear log line (the
+# worker resolves them next turn).
+git fetch --quiet origin dev
+if ! git rebase origin/dev >> "$LOG" 2>&1; then
+  git rebase --abort >> "$LOG" 2>&1 || true
+  echo "GATE FAILED at: rebase onto origin/dev has conflicts; resolve and re-run" | tee -a "$LOG"
+  exit 1
+fi
+
 # Node deps: link the clone's node_modules (bun install is content-addressed;
 # a fresh install would re-download everything for identical deps).
 [ -d node_modules ] || ln -s "$REPO/node_modules" node_modules
