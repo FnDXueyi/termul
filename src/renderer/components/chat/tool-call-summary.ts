@@ -449,6 +449,8 @@ const ACTIVITY_PHRASES: Record<ActivityCategory, { one: string; many: (n: number
   other: { one: 'used 1 tool', many: (n) => `used ${n} tools` }
 }
 
+const THOUGHT_PHRASE = { one: 'thought', many: (n: number) => `thought ${n} times` }
+
 /** `.t-think-text` is `nowrap`, so the phrase count is the label's length bound. */
 const MAX_ACTIVITY_PHRASES = 4
 
@@ -459,14 +461,18 @@ export interface ToolActivitySummary {
 }
 
 /**
- * Roll a turn's tool calls into one categorized line for the collapsed
- * activity disclosure — "Ran 2 commands, created 1 file" — plus the summed
- * diff counts. Categories appear in first-occurrence order; past the cap the
- * label tails off as "and N more", where N counts the unshown CALLS. Null
- * when the turn ran no tools.
+ * Roll tool calls into one categorized line for a collapsed activity
+ * disclosure — "Ran 2 commands, created 1 file" — plus the summed diff
+ * counts. A `thoughts` count leads the line: "Thought 3 times, ran 2
+ * commands". Phrases appear in first-occurrence order; past the cap the label
+ * tails off as "and N more", where N counts the unshown CALLS. Null when there
+ * are neither calls nor thoughts.
  */
-export function summarizeToolActivity(calls: ToolCall[]): ToolActivitySummary | null {
-  if (calls.length === 0) return null
+export function summarizeToolActivity(
+  calls: ToolCall[],
+  { thoughts = 0 }: { thoughts?: number } = {}
+): ToolActivitySummary | null {
+  if (calls.length === 0 && thoughts === 0) return null
   const counts = new Map<ActivityCategory, number>()
   let added = 0
   let removed = 0
@@ -479,12 +485,15 @@ export function summarizeToolActivity(calls: ToolCall[]): ToolActivitySummary | 
       removed += diffStat.removed
     }
   }
-  const entries = [...counts.entries()]
-  const phrases = entries.slice(0, MAX_ACTIVITY_PHRASES).map(([category, count]) => {
-    const phrase = ACTIVITY_PHRASES[category]
-    return count === 1 ? phrase.one : phrase.many(count)
-  })
-  const hiddenCalls = entries.slice(MAX_ACTIVITY_PHRASES).reduce((sum, [, n]) => sum + n, 0)
+  const entries = [...counts].map(([category, count]) => ({
+    phrase: ACTIVITY_PHRASES[category],
+    count
+  }))
+  if (thoughts > 0) entries.unshift({ phrase: THOUGHT_PHRASE, count: thoughts })
+  const phrases = entries
+    .slice(0, MAX_ACTIVITY_PHRASES)
+    .map(({ phrase, count }) => (count === 1 ? phrase.one : phrase.many(count)))
+  const hiddenCalls = entries.slice(MAX_ACTIVITY_PHRASES).reduce((sum, { count }) => sum + count, 0)
   let label = phrases.join(', ')
   if (hiddenCalls > 0) label += `, and ${hiddenCalls} more`
   return { label: label.charAt(0).toUpperCase() + label.slice(1), added, removed }
