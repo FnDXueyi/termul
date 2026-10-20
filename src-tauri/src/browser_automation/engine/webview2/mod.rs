@@ -8,6 +8,7 @@
 //! to the awaiting task.
 
 mod dialogs;
+mod downloads;
 pub mod events;
 pub mod input;
 mod external_protocol;

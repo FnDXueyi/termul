@@ -19,7 +19,9 @@ use gtk::glib::prelude::*;
 use gtk::prelude::WidgetExt;
 use tauri::webview::PlatformWebview;
 use tauri::Url;
-use webkit2gtk::{Download, DownloadExt, SettingsExt, URIRequestExt, WebContextExt, WebViewExt};
+use webkit2gtk::{
+    Download, DownloadExt, SettingsExt, URIRequestExt, URIResponseExt, WebContextExt, WebViewExt,
+};
 
 use super::{chooser, dialogs};
 use crate::browser_automation::engine::events::{TabEvents, TabRole};
@@ -111,9 +113,27 @@ fn take_download(
         return;
     };
     let destination = path.to_string_lossy().into_owned();
+    let announced = events.clone();
+    let announced_url = url.clone();
     download.connect_decide_destination(move |download, _| {
+        // The response is in by now: a length past the cap is refused
+        // before any byte lands.
+        let length = download.response().map_or(0, |r| r.content_length());
+        if !announced.download_progress(&announced_url, length) {
+            download.cancel();
+            return true;
+        }
         download.set_destination(&destination);
         true
+    });
+    let progress = events.clone();
+    let progress_url = url.clone();
+    let cancelled = Cell::new(false);
+    download.connect_received_data(move |download, _| {
+        if !cancelled.get() && !progress.download_progress(&progress_url, download.received_data_length()) {
+            cancelled.set(true);
+            download.cancel();
+        }
     });
     let failed = Rc::new(Cell::new(false));
     let failed_flag = failed.clone();

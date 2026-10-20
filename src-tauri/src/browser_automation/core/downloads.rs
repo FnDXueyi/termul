@@ -8,6 +8,11 @@
 //!
 //! Engine hooks are synchronous, so the confirmation comes after the bytes
 //! landed in the session directory and before anything else can use them.
+//! The size cap holds while the bytes stream where the engine reports
+//! progress (WebView2, WebKitGTK): a download announcing more is cancelled
+//! before any byte lands, and one that grows past it is cancelled there.
+//! Tauri's WKWebView hook reports no progress, so on macOS the cap is
+//! checked when the download finishes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +85,18 @@ impl Downloads {
     pub fn forget(&self, session_id: &str) {
         self.sessions.lock().remove(session_id);
     }
+}
+
+/// Whether a download of `tab` that has (or announced) `bytes` may go on.
+pub fn within_cap(tab: &str, bytes: u64) -> bool {
+    if bytes <= MAX_DOWNLOAD_BYTES {
+        return true;
+    }
+    log::info!(
+        "[browser-agent] download cancelled tab={} reason=too_large",
+        label_prefix(tab)
+    );
+    false
 }
 
 /// The extension a download keeps: ASCII alphanumerics only, short, lower

@@ -24,6 +24,21 @@ pub const REPORT_PATH: &str = "/report";
 pub const DOWNLOAD_PATH: &str = "/fixture-download.bin";
 /// The fake file `DOWNLOAD_PATH` serves as an attachment.
 pub const DOWNLOAD_BODY: &str = "fake download for the conformance suite\n";
+/// An attachment of `BIG_DOWNLOAD_BYTES` zeros. `?length=announced` sends
+/// its Content-Length up front and trickles the body; otherwise the body
+/// streams at about 100 MB/s with no length, slow enough that a cancel at
+/// the cap lands well before the end. Each reports how many bytes it sent
+/// before it ended.
+pub const BIG_DOWNLOAD_PATH: &str = "/fixture-big.bin";
+/// Past the host's per-download cap.
+pub const BIG_DOWNLOAD_BYTES: u64 = 300 * 1024 * 1024;
+const BIG_CHUNK: usize = 64 * 1024;
+/// The announced body's pace: 64 KiB every 5 ms, so a whole body takes
+/// longer than any case waits.
+const TRICKLE: Duration = Duration::from_millis(5);
+/// The streamed body's pace: 1 MiB every 10 ms.
+const STREAM_STEP: u64 = 1024 * 1024;
+const STREAM_PAUSE: Duration = Duration::from_millis(10);
 
 /// A policy under which the browser runs no page script at all.
 const STRICT_CSP: &str = "default-src 'none'; form-action 'self'";
@@ -76,6 +91,7 @@ fn route(path: &str) -> Reply {
         "/link-away.html" => Reply::Page(include_str!("pages/link-away.html")),
         "/upload.html" => Reply::Page(include_str!("pages/upload.html")),
         "/download.html" => Reply::Page(include_str!("pages/download.html")),
+        "/download-big.html" => Reply::Page(include_str!("pages/download-big.html")),
         DOWNLOAD_PATH => Reply::Attachment(DOWNLOAD_BODY),
         REDIRECT_TARGET_PATH => Reply::Page(include_str!("pages/redirect-target.html")),
         REDIRECT_PATH => Reply::Redirect(REDIRECT_TARGET_PATH),
@@ -201,6 +217,20 @@ fn serve(mut stream: TcpStream, reports: &Reports) -> io::Result<()> {
         return stream.flush();
     }
 
+    if path == BIG_DOWNLOAD_PATH {
+        let announced = target.contains("length=announced");
+        let sent = stream_big(&mut stream, announced);
+        let report = serde_json::json!({
+            "bigDownload": if announced { "announced" } else { "streamed" },
+            "sent": sent,
+            "complete": sent == BIG_DOWNLOAD_BYTES,
+        });
+        if let Ok(mut all) = reports.lock() {
+            all.push(report.to_string());
+        }
+        return Ok(());
+    }
+
     let (status, extra_headers, body): (&str, String, &str) = match route(path) {
         Reply::Page(html) => (
             "200 OK",
@@ -232,4 +262,36 @@ fn serve(mut stream: TcpStream, reports: &Reports) -> io::Result<()> {
     );
     stream.write_all(response.as_bytes())?;
     stream.flush()
+}
+
+/// Serve the big attachment and return how many body bytes went out
+/// before the body ended or the client hung up.
+fn stream_big(stream: &mut TcpStream, announced: bool) -> u64 {
+    let length = if announced {
+        format!("Content-Length: {BIG_DOWNLOAD_BYTES}\r\n")
+    } else {
+        String::new()
+    };
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"fixture-big.bin\"\r\n{length}Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(head.as_bytes()).is_err() {
+        return 0;
+    }
+    let chunk = [0u8; BIG_CHUNK];
+    let mut sent = 0u64;
+    while sent < BIG_DOWNLOAD_BYTES {
+        let n = (BIG_DOWNLOAD_BYTES - sent).min(BIG_CHUNK as u64) as usize;
+        if stream.write_all(&chunk[..n]).is_err() {
+            break;
+        }
+        sent += n as u64;
+        if announced {
+            std::thread::sleep(TRICKLE);
+        } else if sent.is_multiple_of(STREAM_STEP) {
+            std::thread::sleep(STREAM_PAUSE);
+        }
+    }
+    let _ = stream.flush();
+    sent
 }

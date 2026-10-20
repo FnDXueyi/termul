@@ -8,7 +8,7 @@ use tauri::webview::PlatformWebview;
 use webview2_com::{take_pwstr, SourceChangedEventHandler};
 use windows_core::{BOOL, PWSTR};
 
-use super::{dialogs, external_protocol, observe};
+use super::{dialogs, downloads, external_protocol, observe};
 use crate::browser_automation::engine::events::{TabEvents, TabRole};
 
 /// Confirm the controller has a live `ICoreWebView2` and register the
@@ -24,6 +24,9 @@ pub fn attach(platform: &PlatformWebview, events: TabEvents) -> bool {
         log::warn!("[browser-tab] WebView2 runtime has no external-launch hook; the navigation hook alone denies them");
     }
     if events.role() == TabRole::Agent && !(dialogs::attach(&core, &events) && observe::attach(&core, &events)) {
+        return false;
+    }
+    if events.holds_downloads() && !downloads::attach(&core, &events) {
         return false;
     }
     let handler = SourceChangedEventHandler::create(Box::new(move |webview, args| {

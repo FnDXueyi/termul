@@ -523,3 +523,22 @@ async fn downloads_are_refused_for_user_tabs_after_stop_and_past_the_cap() {
         "stopped"
     );
 }
+
+#[tokio::test]
+async fn a_download_past_the_size_cap_is_cancelled_while_it_streams() {
+    let r = rig(vec![]);
+    let tab = r.open(LOGIN).await;
+    let events = r.h.host.tab_events(&tab);
+    let url: tauri::Url = "http://127.0.0.1:4100/big.bin".parse().unwrap();
+    let path = events
+        .download_starting(&url, std::path::Path::new("big.bin"))
+        .expect("admitted");
+    let cap = super::super::downloads::MAX_DOWNLOAD_BYTES;
+    assert!(events.download_progress(&url, cap), "at the cap");
+    assert!(!events.download_progress(&url, cap + 1), "past the cap");
+    std::fs::write(&path, b"partial").unwrap();
+    events.download_finished(&url, false);
+    until(|| !path.exists()).await;
+    assert!(r.ticket_actions().is_empty(), "a cancelled download asks nobody");
+}
+

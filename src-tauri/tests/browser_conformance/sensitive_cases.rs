@@ -18,6 +18,10 @@ const SHADOW_PASSWORD_READY: &str = "Shadow password fixture";
 const UPLOAD_READY: &str = "Upload fixture";
 const DOWNLOAD_READY: &str = "Download fixture";
 const DOWNLOAD_WAIT: Duration = Duration::from_secs(15);
+/// Long enough for a streamed body to pass the cap, far short of the
+/// announced body's full trickle.
+const BIG_DOWNLOAD_WAIT: Duration = Duration::from_secs(60);
+const BIG_DOWNLOAD_SETTLE: Duration = Duration::from_secs(3);
 
 fn origin(c: &Ctx<'_>) -> String {
     c.fixtures.url("").trim_end_matches('/').to_string()
@@ -289,13 +293,17 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-async fn until(what: &str, mut done: impl FnMut() -> bool) -> CaseResult {
-    let deadline = Instant::now() + DOWNLOAD_WAIT;
+async fn until(what: &str, done: impl FnMut() -> bool) -> CaseResult {
+    until_within(what, DOWNLOAD_WAIT, done).await
+}
+
+async fn until_within(what: &str, wait: Duration, mut done: impl FnMut() -> bool) -> CaseResult {
+    let deadline = Instant::now() + wait;
     while !done() {
         if Instant::now() > deadline {
             return Err(mismatch(format!(
                 "{what} did not happen within {}s",
-                DOWNLOAD_WAIT.as_secs()
+                wait.as_secs()
             )));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -375,4 +383,38 @@ pub async fn download_preapproved(c: &Ctx<'_>) -> CaseResult {
         return Err(mismatch("the pre-approved download was deleted"));
     }
     expect_tickets(c, &[], "pre-approved download")
+}
+
+/// A download past the host's size cap is cancelled while it streams:
+/// one announcing its length before any byte lands, one sent without a
+/// length once it grows past the cap. Pre-approved, so only the cap stops
+/// them, and nothing is left under app data.
+pub async fn download_size_cap(c: &Ctx<'_>) -> CaseResult {
+    if cfg!(target_os = "macos") {
+        return Err(Failure {
+            code: "capability_unavailable".into(),
+            reason: Some("download_progress".into()),
+            message: "tauri's WKWebView hook reports no download progress; the cap applies when it finishes".into(),
+        });
+    }
+    preapprove(c, Scope::App, ActionClass::Download).await?;
+    c.open("/download-big.html", "Big download fixture").await?;
+    let dir = c.engine.downloads_dir(&c.session);
+    for (link, kind) in [("Get the announced file", "announced"), ("Get the streamed file", "streamed")] {
+        let target = c.ref_of("link", link).await?;
+        c.call("click", json!({ "ref": target })).await?;
+        let ended = || {
+            let all = c.fixtures.reports();
+            all.into_iter().filter(|r| r["bigDownload"] == kind).collect::<Vec<_>>()
+        };
+        until_within(&format!("the {kind} download ending"), BIG_DOWNLOAD_WAIT, || !ended().is_empty()).await?;
+        // WebKitGTK cancels the page's own request and asks again: give the
+        // second request time to start before judging what is on disk.
+        tokio::time::sleep(BIG_DOWNLOAD_SETTLE).await;
+        until(&format!("deleting the cancelled {kind} download"), || files_in(&dir).is_empty()).await?;
+        if let Some(whole) = ended().into_iter().find(|r| r["complete"] != false) {
+            return Err(mismatch(format!("the {kind} download ran to the end: {whole}")));
+        }
+    }
+    expect_tickets(c, &[], "downloads past the size cap")
 }

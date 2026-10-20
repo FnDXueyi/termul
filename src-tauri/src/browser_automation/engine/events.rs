@@ -134,6 +134,12 @@ pub trait NavPolicy: Send + Sync {
     fn download_starting(&self, _tab: &str, _url: &Url, _suggested: &Path) -> Option<PathBuf> {
         None
     }
+    /// A download the tab holds has, or announced it will have, `bytes`.
+    /// False cancels it: engines that report progress call this while the
+    /// bytes stream, and once with the announced length before any land.
+    fn download_progress(&self, _tab: &str, _url: &Url, _bytes: u64) -> bool {
+        true
+    }
     fn download_finished(&self, _tab: &str, _url: &Url, _success: bool) {}
 }
 
@@ -235,6 +241,11 @@ impl TabEvents {
 
     pub fn download_starting(&self, url: &Url, suggested: &Path) -> Option<PathBuf> {
         self.policy.download_starting(&self.label, url, suggested)
+    }
+
+    #[cfg_attr(target_os = "macos", allow(dead_code, reason = "tauri's WKWebView hook reports no download progress"))]
+    pub fn download_progress(&self, url: &Url, bytes: u64) -> bool {
+        self.policy.download_progress(&self.label, url, bytes)
     }
 
     pub fn download_finished(&self, url: &Url, success: bool) {
