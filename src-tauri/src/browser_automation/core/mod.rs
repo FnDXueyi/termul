@@ -55,6 +55,7 @@ use crate::web::EventSink;
 use authz::HopVerdict;
 use consent::ConsentGate;
 use events::TabProjection;
+use reply::PageData;
 use ports::{PermissionRequest, PolicyStore};
 use surface::{PaneSurface, TabSurface};
 use tabs::{FirstLoad, TabRegistry};
@@ -375,10 +376,12 @@ impl BrowserHost for DesktopBrowserHost {
                         )
                         .with_reason("deadline"));
                     }
-                    let reads_page =
-                        matches!(spec.verb, dispatch::Verb::Snapshot | dispatch::Verb::Screenshot);
                     let done = self.act_watched(session_id, spec, call, deadline).await;
-                    if done.is_ok() && reads_page {
+                    let reads_page = |success: &Success| {
+                        spec.verb == dispatch::Verb::Screenshot
+                            || success.page.as_ref().is_some_and(PageData::carries_page_text)
+                    };
+                    if done.as_ref().is_ok_and(reads_page) {
                         self.gate.taint(session_id);
                     }
                     done

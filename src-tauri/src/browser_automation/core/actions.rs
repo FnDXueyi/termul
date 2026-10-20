@@ -362,6 +362,9 @@ impl DesktopBrowserHost {
             .filter_map(|label| {
                 let tab = self.tab_facts(label).ok()?;
                 let page = self.page_meta(label)?;
+                if page.carries_page_text() {
+                    self.gate.taint(session_id);
+                }
                 Some(json!({ "tab": tab, "page": page }))
             })
             .collect();
