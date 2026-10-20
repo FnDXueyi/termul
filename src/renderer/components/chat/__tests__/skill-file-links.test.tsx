@@ -146,12 +146,43 @@ describe('skill file links', () => {
     )
     const button = await screen.findByRole('button', { name: 'Open skill forge-idea' })
     const range = document.createRange()
-    range.selectNodeContents(screen.getByText('selected text'))
+    range.setStart(screen.getByText('selected text').firstChild as Text, 0)
+    range.setEndAfter(button)
     window.getSelection()?.addRange(range)
 
     fireEvent.click(button)
 
     expect(openFileRef.current).not.toHaveBeenCalled()
+  })
+
+  it('opens from a bubble click while text elsewhere or an empty range is selected', async () => {
+    render(
+      <SkillFilesProvider projectRoot="/work/app">
+        <p>other text</p>
+        <div data-testid="empty-composer">
+          <p />
+        </div>
+        <SkillChipLink name="forge-idea" surface="bubble" />
+      </SkillFilesProvider>
+    )
+    const button = await screen.findByRole('button', { name: 'Open skill forge-idea' })
+
+    const elsewhere = document.createRange()
+    elsewhere.selectNodeContents(screen.getByText('other text'))
+    window.getSelection()?.addRange(elsewhere)
+    await act(async () => {
+      fireEvent.click(button)
+    })
+    expect(openFileRef.current).toHaveBeenCalledTimes(1)
+
+    window.getSelection()?.removeAllRanges()
+    const empty = document.createRange()
+    empty.selectNodeContents(screen.getByTestId('empty-composer'))
+    window.getSelection()?.addRange(empty)
+    await act(async () => {
+      fireEvent.click(button)
+    })
+    expect(openFileRef.current).toHaveBeenCalledTimes(2)
   })
 
   it('toasts and logs when the editor cannot open the file', async () => {

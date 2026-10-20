@@ -8,7 +8,7 @@ interface CommandChipProps {
   className?: string
   /** Opens the `SKILL.md` behind a skill-backed command. When set the chip
    * renders as a button. */
-  onOpen?: () => void
+  onOpen?: (chip: HTMLElement) => void
   /** Tab order for the button form (the composer passes `-1`). */
   tabIndex?: number
 }

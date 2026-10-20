@@ -6,7 +6,7 @@ interface OpenableChipProps {
   /** Skill whose `SKILL.md` the button opens (labels + `data-skill-open`). */
   skillName: string
   /** When set the chip is a button; otherwise a static span. */
-  onOpen?: () => void
+  onOpen?: (chip: HTMLElement) => void
   tabIndex?: number
   children: React.ReactNode
 }
@@ -33,7 +33,7 @@ export function OpenableChip({
       title={`Open ${skillName} SKILL.md`}
       aria-label={`Open skill ${skillName}`}
       tabIndex={tabIndex}
-      onClick={onOpen}
+      onClick={(event) => onOpen(event.currentTarget)}
       className={cn(
         className,
         'cursor-pointer appearance-none rounded-sm underline-offset-2 hover:underline',

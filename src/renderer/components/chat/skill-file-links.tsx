@@ -81,22 +81,35 @@ export async function openSkillFile(name: string, path: string): Promise<boolean
 
 /** Where a chip renders. In the composer the chip is not a tab stop (the
  * editor owns the keyboard). In a chat bubble a click that ends a text
- * selection does not open the file. */
+ * selection over the chip does not open the file. */
 type ChipSurface = 'composer' | 'bubble'
+
+/** True when the user selected text that reaches the chip. A selection with
+ * no text (the composer leaves one after select-all + delete) or a selection
+ * elsewhere on the page must not block the click. */
+function selectionTouches(chip: HTMLElement): boolean {
+  const selection = window.getSelection()
+  if (!selection || selection.isCollapsed) return false
+  if (selection.toString().length === 0) return false
+  for (let i = 0; i < selection.rangeCount; i += 1) {
+    if (selection.getRangeAt(i).intersectsNode(chip)) return true
+  }
+  return false
+}
 
 function useOpenHandler(
   name: string,
   path: string | null,
   surface: ChipSurface
-): (() => void) | undefined {
-  const open = useCallback(() => {
-    if (!path) return
-    if (surface === 'bubble') {
-      const selection = window.getSelection()
-      if (selection && !selection.isCollapsed) return
-    }
-    void openSkillFile(name, path)
-  }, [name, path, surface])
+): ((chip: HTMLElement) => void) | undefined {
+  const open = useCallback(
+    (chip: HTMLElement) => {
+      if (!path) return
+      if (surface === 'bubble' && selectionTouches(chip)) return
+      void openSkillFile(name, path)
+    },
+    [name, path, surface]
+  )
   return path ? open : undefined
 }
 

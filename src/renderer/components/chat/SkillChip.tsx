@@ -6,7 +6,7 @@ interface SkillChipProps {
   name: string
   className?: string
   /** Opens the skill's `SKILL.md`. When set the chip renders as a button. */
-  onOpen?: () => void
+  onOpen?: (chip: HTMLElement) => void
   /** Tab order for the button form (the composer passes `-1`). */
   tabIndex?: number
 }
