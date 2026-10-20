@@ -109,11 +109,7 @@ async fn test_full_annotation_lifecycle() {
 async fn raw_status(addr: SocketAddr, path: &str, host: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let request = format!("GET {path} HTTP/1.1
-Host: {host}
-Connection: close
-
-");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).await.unwrap();

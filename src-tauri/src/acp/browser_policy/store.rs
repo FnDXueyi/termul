@@ -272,7 +272,7 @@ fn parse_doc<T: PolicyDoc>(bytes: &[u8]) -> T {
 
 fn unreadable<T: PolicyDoc>(newer: bool, error: &serde_json::Error) -> T {
     log::error!(
-        "[browser-policy] a policy file does not parse (newer_schema={newer}, line {} column {});          using an ephemeral, read-only policy until it is repaired",
+        "[browser-policy] a policy file does not parse (newer_schema={newer}, line {} column {}); using an ephemeral, read-only policy until it is repaired",
         error.line(),
         error.column()
     );
