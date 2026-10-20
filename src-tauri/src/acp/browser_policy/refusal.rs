@@ -38,7 +38,8 @@ pub enum PolicyRefusal {
     RevisionConflict {
         current: u64,
     },
-    /// The policy file was written by a newer build and is never overwritten.
+    /// The policy file was written by a newer build, or does not parse, and
+    /// is never overwritten.
     ReadOnly,
     /// No policy store is installed on this host (for example `termul-server`).
     StoreUnavailable,
@@ -95,7 +96,7 @@ impl PolicyRefusal {
                 format!("the policy changed (now at revision {current}); reload and retry")
             }
             Self::ReadOnly => {
-                "this policy was written by a newer version of termul and is read-only".to_string()
+                "this policy file was written by a newer version of termul or does not parse, so it is read-only".to_string()
             }
             Self::StoreUnavailable => "browser policy is not available on this host".to_string(),
             Self::ProfileEngineUnavailable => {

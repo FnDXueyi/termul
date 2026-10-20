@@ -4,7 +4,9 @@
 //! app-data root and never inside a project tree. Edits are serialized per
 //! file by an async lock and gated by a revision compare-and-swap. A file
 //! written by a newer build is read-only here: edits are refused and the
-//! file is never rewritten.
+//! file is never rewritten. A file this build cannot parse fails closed: the
+//! scope reads as ephemeral (no global profile), read-only, so the user's file
+//! stays as it is until it is repaired or removed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -178,11 +180,13 @@ impl AppFile {
 }
 
 /// A policy document as stored: how it reads from and writes to its file.
-trait PolicyDoc: Send + 'static {
+trait PolicyDoc: Default + Send + 'static {
     type File: for<'de> Deserialize<'de>;
 
     fn from_file(file: Self::File, read_only: bool) -> Self;
-    fn defaults(read_only: bool) -> Self;
+    /// What an unparseable file reads as: read-only, and never wider than
+    /// the defaults (no global profile).
+    fn fail_closed() -> Self;
     fn to_bytes(&self) -> serde_json::Result<Vec<u8>>;
     fn read_only(&self) -> bool;
     fn revision(&self) -> u64;
@@ -196,9 +200,10 @@ impl PolicyDoc for ProjectPolicy {
         file.into_policy(read_only)
     }
 
-    fn defaults(read_only: bool) -> Self {
+    fn fail_closed() -> Self {
         Self {
-            read_only,
+            read_only: true,
+            profile_mode: ProfileMode::Ephemeral,
             ..Self::default()
         }
     }
@@ -227,9 +232,10 @@ impl PolicyDoc for AppPolicy {
         file.into_policy(read_only)
     }
 
-    fn defaults(read_only: bool) -> Self {
+    fn fail_closed() -> Self {
         Self {
-            read_only,
+            read_only: true,
+            global_profile_enabled: false,
             ..Self::default()
         }
     }
@@ -252,26 +258,25 @@ impl PolicyDoc for AppPolicy {
 }
 
 /// Parse one policy file. A newer version is read leniently and marked
-/// read-only; an unreadable file is preserved beside the original and the
-/// scope starts again from defaults.
-fn parse_doc<T: PolicyDoc>(path: &Path, bytes: &[u8]) -> T {
+/// read-only; a file that does not parse fails closed.
+fn parse_doc<T: PolicyDoc>(bytes: &[u8]) -> T {
     let newer = match serde_json::from_slice::<VersionProbe>(bytes) {
         Ok(VersionProbe { version }) => version > SCHEMA_VERSION,
-        Err(error) => return unreadable(path, bytes, &error.to_string()),
+        Err(error) => return unreadable(false, &error),
     };
-    match (serde_json::from_slice::<T::File>(bytes), newer) {
-        (Ok(file), newer) => T::from_file(file, newer),
-        (Err(_), true) => T::defaults(true),
-        (Err(error), false) => unreadable(path, bytes, &error.to_string()),
+    match serde_json::from_slice::<T::File>(bytes) {
+        Ok(file) => T::from_file(file, newer),
+        Err(error) => unreadable(newer, &error),
     }
 }
 
-fn unreadable<T: PolicyDoc>(path: &Path, bytes: &[u8], why: &str) -> T {
-    log::error!("[browser-policy] a policy file is unreadable ({why}); starting from defaults");
-    if let Err(error) = atomic_file::backup_corrupt(path, bytes) {
-        log::error!("[browser-policy] could not preserve the unreadable file: {error}");
-    }
-    T::defaults(false)
+fn unreadable<T: PolicyDoc>(newer: bool, error: &serde_json::Error) -> T {
+    log::error!(
+        "[browser-policy] a policy file does not parse (newer_schema={newer}, line {} column {});          using an ephemeral, read-only policy until it is repaired",
+        error.line(),
+        error.column()
+    );
+    T::fail_closed()
 }
 
 /// Per-scope async locks, created on first use.
@@ -347,12 +352,12 @@ impl PolicyFiles {
 
 async fn read_doc<T: PolicyDoc>(path: PathBuf) -> Result<T, PolicyRefusal> {
     let loaded = spawn_io(move || match std::fs::read(&path) {
-        Ok(bytes) => Ok(Some(parse_doc::<T>(&path, &bytes))),
+        Ok(bytes) => Ok(Some(parse_doc::<T>(&bytes))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     })
     .await?;
-    Ok(loaded.unwrap_or_else(|| T::defaults(false)))
+    Ok(loaded.unwrap_or_default())
 }
 
 /// Read, check, edit and persist one document. The caller holds its lock.

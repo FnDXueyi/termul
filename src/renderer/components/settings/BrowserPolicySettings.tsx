@@ -27,7 +27,8 @@ function Loading(): React.JSX.Element {
 function ReadOnlyNotice(): React.JSX.Element {
   return (
     <SettingsNotice>
-      These rules were saved by a newer version of Termul. You can read them but not change them.
+      These rules were saved by a newer version of Termul, or their file is damaged. You can read
+      them but not change them.
     </SettingsNotice>
   )
 }

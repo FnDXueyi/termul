@@ -136,14 +136,14 @@ async fn a_newer_schema_version_is_read_only_and_never_overwritten() {
 }
 
 #[tokio::test]
-async fn a_newer_app_file_that_does_not_fit_is_still_read_only() {
+async fn a_newer_app_file_that_does_not_fit_is_read_only_without_the_global_profile() {
     let (dir, files) = files();
     let path = dir.path().join("app.json");
     let newer = br#"{"version":2,"globalProfileEnabled":"sometimes"}"#;
     std::fs::write(&path, newer).unwrap();
 
     let policy = files.read_app().await.unwrap();
-    assert!(policy.read_only);
+    assert_eq!((policy.read_only, policy.global_profile_enabled), (true, false));
     assert_eq!(
         files
             .edit_app(0, |p| p.apply(AppPolicyOp::SetGlobalProfile(false)))
@@ -155,18 +155,40 @@ async fn a_newer_app_file_that_does_not_fit_is_still_read_only() {
 }
 
 #[tokio::test]
-async fn an_unreadable_file_is_preserved_and_the_scope_restarts_from_defaults() {
+async fn an_unparseable_file_fails_closed_and_is_left_as_it_is() {
     let (dir, files) = files();
-    let path = dir.path().join("app.json");
-    std::fs::write(&path, b"{ not json").unwrap();
+    let app_path = dir.path().join("app.json");
+    let project_path = dir.path().join("projects").join("p1.json");
+    std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+    std::fs::write(&app_path, b"{ not json").unwrap();
+    std::fs::write(&project_path, br#"{"version":1,"profileMode":"ephemeral",}"#).unwrap();
 
-    let policy = files.read_app().await.unwrap();
-    assert_eq!(policy, AppPolicy::default());
-    let preserved = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .any(|entry| entry.file_name() != "app.json");
-    assert!(preserved, "the unreadable file is kept beside the original");
+    let app = files.read_app().await.unwrap();
+    let project = files.read_project("p1").await.unwrap();
+    assert_eq!(
+        (app.read_only, app.global_profile_enabled, app.preapprovals.len()),
+        (true, false, 0)
+    );
+    assert_eq!(
+        (project.read_only, project.profile_mode, project.allow_list.len()),
+        (true, ProfileMode::Ephemeral, 0)
+    );
+    assert_eq!(
+        files
+            .edit_app(0, |p| p.apply(AppPolicyOp::SetGlobalProfile(true)))
+            .await
+            .unwrap_err(),
+        PolicyRefusal::ReadOnly
+    );
+    assert_eq!(
+        files
+            .edit_project("p1", 0, |p| p.apply(ProjectPolicyOp::SetEphemeral(false)))
+            .await
+            .unwrap_err(),
+        PolicyRefusal::ReadOnly
+    );
+    assert_eq!(std::fs::read(&app_path).unwrap(), b"{ not json");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2, "no copies are written");
 }
 
 #[tokio::test]
