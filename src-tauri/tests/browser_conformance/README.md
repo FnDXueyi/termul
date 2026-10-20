@@ -32,8 +32,9 @@ They need no eval channel, so they run on every engine. Each one also checks
 that the chat stand-in kept focus and received nothing. A capability the
 adapter declares synthetic must refuse trusted input.
 
-It skips unless `TERMUL_BROWSER_CONFORMANCE` is set, so plain `cargo test`
-stays headless. `TERMUL_BROWSER_CONFORMANCE_OUT` sets where the JSON summary
+It skips unless `TERMUL_BROWSER_CONFORMANCE` is set. The target needs the
+`conformance` feature, which exposes the library seam it drives, so plain
+`cargo test` does not build it. `TERMUL_BROWSER_CONFORMANCE_OUT` sets where the JSON summary
 goes.
 
 ## Expected results
@@ -52,7 +53,7 @@ only unlisted failures fail the run.
 
 ```sh
 cd src-tauri
-TERMUL_BROWSER_CONFORMANCE=1 cargo test --test browser_conformance -- --nocapture
+TERMUL_BROWSER_CONFORMANCE=1 cargo test --features conformance --test browser_conformance -- --nocapture
 ```
 
 On Linux wrap the command in `xvfb-run -a` when no display is available.
@@ -66,7 +67,7 @@ checks that cookies stay where they belong:
 
 ```sh
 cd src-tauri
-TERMUL_PROFILE_FIXTURE=1 cargo test --test browser_conformance -- --nocapture
+TERMUL_PROFILE_FIXTURE=1 cargo test --features conformance --test browser_conformance -- --nocapture
 ``` On
-Windows build the test executable with `tests/browser_conformance/build-windows-tests.ps1`
-first, which installs the Common-Controls manifest the executable needs.
+Windows build the test executable with
+`tests/browser_conformance/build-windows-tests.ps1 --features conformance` first, which installs the Common-Controls manifest the executable needs.

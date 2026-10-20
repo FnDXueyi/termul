@@ -84,11 +84,12 @@ jobs:
 
       - name: Cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features conformance -- -D warnings
 
       # Fails on any failing test that known-test-failures/<os>.txt does not
       # list. On Windows it also installs the Common-Controls manifest next to
-      # each test executable.
+      # each test executable. It builds with the `conformance` feature, so the
+      # conformance step below reuses the same executables.
       - name: Cargo test
         working-directory: src-tauri
         shell: bash
@@ -106,9 +107,9 @@ jobs:
           GDK_BACKEND: x11
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a --server-args="-screen 0 1600x1000x24" cargo test --test browser_conformance -- --nocapture
+            xvfb-run -a --server-args="-screen 0 1600x1000x24" cargo test --features conformance --test browser_conformance -- --nocapture
           else
-            cargo test --test browser_conformance -- --nocapture
+            cargo test --features conformance --test browser_conformance -- --nocapture
           fi
 
       - name: Upload conformance summary

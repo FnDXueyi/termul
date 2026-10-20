@@ -50,6 +50,9 @@ standalone-server = []
 # `--features custom-protocol`. `build.rs` fails a release desktop build that
 # lacks it.
 custom-protocol = ["tauri/custom-protocol"]
+# Exposes the library's `conformance_support` seam to the browser conformance
+# runner below. Only that test target enables it; shipping builds never do.
+conformance = []
 
 # Runs the real automation host on a real webview, so it needs its own `main`
 # (tao requires the main thread on macOS). Skips unless
@@ -58,6 +61,7 @@ custom-protocol = ["tauri/custom-protocol"]
 name = "browser_conformance"
 path = "tests/browser_conformance/main.rs"
 harness = false
+required-features = ["conformance"]
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }

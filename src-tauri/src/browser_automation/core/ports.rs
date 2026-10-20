@@ -134,6 +134,10 @@ pub trait PolicyStore: Send + Sync {
         expected_revision: u64,
         op: ProjectPolicyOp,
     ) -> PortFuture<'a, Result<ProjectPolicy, PolicyRefusal>>;
+    #[cfg_attr(
+        not(feature = "conformance"),
+        allow(dead_code, reason = "only the conformance runner edits app policy through the port")
+    )]
     fn apply_app(
         &self,
         expected_revision: u64,

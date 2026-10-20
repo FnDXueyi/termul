@@ -63,6 +63,7 @@ pub const ACTION_EVAL: Duration = EVAL_STEP;
 pub const ACTIONABILITY_WAIT: Duration = secs(5);
 pub const ACTIONABILITY_POLL: Duration = Duration::from_millis(100);
 /// Native input on macOS and Linux: one UI-thread round trip.
+#[cfg(not(windows))]
 pub const NATIVE_INPUT: Duration = secs(5);
 /// One trusted input event on any engine; CDP is the slowest.
 const INPUT_EVENT: Duration = CDP_CALL;

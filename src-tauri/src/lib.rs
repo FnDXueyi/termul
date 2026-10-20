@@ -178,7 +178,9 @@ pub use acp::claude_admin;
 // Seam for the browser conformance runner (`tests/browser_conformance`), which
 // drives the real automation host from outside the crate. The runner reaches
 // the host only through these names, so a host refactor edits this list and
-// the runner's adapter, nothing else. Not a supported API.
+// the runner's adapter, nothing else. Not a supported API, and absent from
+// every build that does not enable the `conformance` feature.
+#[cfg(feature = "conformance")]
 #[doc(hidden)]
 pub mod conformance_support {
     pub use crate::acp::browser_policy::{
