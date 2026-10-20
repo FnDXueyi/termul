@@ -27,6 +27,9 @@ WT="$REPO/.wt/finish-${BRANCH//\//-}"
 FAIL_DIR="$REPO/goal-routine-runs/_automation/gate-failures"
 LOG="$FAIL_DIR/$(echo "$BRANCH" | tr '/' '-').log"
 mkdir -p "$FAIL_DIR"
+# Cleanup the finisher worktree on EVERY exit path (failed gates used to
+# leak 124MB worktrees each, filling the disk; 2026-10-20 lesson #7).
+trap 'git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || true; git -C "$REPO" worktree remove --force "$REPO/.wt/finish-baseline" 2>/dev/null || true' EXIT
 
 if [ -z "$BRANCH" ] || [ "${BRANCH#routine/}" = "$BRANCH" ]; then
   echo "usage: finish-pr.sh <routine/issue-slug> [--push]" >&2
