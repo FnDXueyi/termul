@@ -158,25 +158,43 @@ pub async fn read(
 /// `#[tauri::command] list_skill_files_cmd` calls). Not nested under
 /// `/skills/` so it cannot shadow a skill named by `/skills/{name}`; the
 /// `/skills` gate prefix still covers it. Degrades to an empty list.
+///
+/// Unlike `/skills`, the index walks the project root's ancestors up to a git
+/// root, so an unresolvable `projectRoot` cannot be let through: a missing
+/// path inside another repository would walk into that repository. Such a
+/// root is dropped (global roots only), and a resolved root is indexed by its
+/// canonical path, never the raw query string.
 pub async fn files(
     State(state): State<AppState>,
     Query(q): Query<SkillsQuery>,
 ) -> impl IntoResponse {
-    if let Some(pr) = &q.project_root {
-        if let Ok(canonical) = std::path::Path::new(pr).canonicalize() {
-            if let Some(err) = crate::web::git_api::ensure_within_project_boundary::<
-                Vec<SkillFileEntry>,
-            >(&canonical, &state.registry)
-            {
+    let project_root = match q.project_root.as_deref().filter(|pr| !pr.is_empty()) {
+        None => None,
+        Some(pr) => match std::path::Path::new(pr).canonicalize() {
+            Err(e) => {
                 tracing::warn!(
-                    "[Security] /skills-index rejected: projectRoot '{}' outside every registered project",
-                    canonical.display()
+                    "/skills-index: projectRoot '{pr}' does not resolve ({e}); indexing global roots only"
                 );
-                return (StatusCode::OK, Json(err));
+                None
             }
-        }
-    }
-    let project_root = q.project_root;
+            Ok(canonical) => {
+                if let Some(err) = crate::web::git_api::ensure_within_project_boundary::<
+                    Vec<SkillFileEntry>,
+                >(&canonical, &state.registry)
+                {
+                    tracing::warn!(
+                        "[Security] /skills-index rejected: projectRoot '{}' outside every registered project",
+                        canonical.display()
+                    );
+                    return (StatusCode::OK, Json(err));
+                }
+                Some(
+                    crate::path_validation::strip_verbatim_prefix(&canonical.to_string_lossy())
+                        .into_owned(),
+                )
+            }
+        },
+    };
     let result = tokio::task::spawn_blocking(move || {
         crate::skills::files::list_skill_files(project_root.as_deref())
     })
