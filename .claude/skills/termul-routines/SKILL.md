@@ -136,6 +136,17 @@ Unattended Pass 2 (issue → PR), explicit operator policy, 2026-10-19:
 
 Every pass ends its section of the reply the same way: one line per issue or check, state, and the action taken. GitHub mutations name the issue number and the exact mutation. A pass that changed nothing says so and why.
 
+## Gate design lessons (2026-10-20, six defects found the hard way)
+
+The deterministic gate in `scripts/routine/finish-pr.sh` earned its shape from six real failures. When extending it, preserve these invariants:
+
+- Compare failures by name with durations stripped: vitest appends per-test timings, so raw line comparison marks every pre-existing failure "new".
+- Biome checks only the branch's changed files: dev itself fails `bun run ci`, and inheriting that red blocks every fix.
+- Retry failing test files ISOLATED (one vitest process each), not batched: batched retries reproduce the full-suite load-order conditions and flake identically. A batched retry is not a retry.
+- Retry the cargo suite once in full: single timing-sensitive tests (canvas frame-limit) fail one run and pass the next.
+- Gate on a healthy disk: a full disk produces empty baseline files and "0 tests" records that silently fail every comparison. The runner checks 10G free before starting.
+- Rebase onto `origin/dev` before gating: claim branches are cut hours earlier and inherit stale dev red that was fixed upstream.
+
 ## Known-failure inventory
 
 Checked against the nightly by Pass 3 step 2. Prune entries once they pass two consecutive nightlies.
