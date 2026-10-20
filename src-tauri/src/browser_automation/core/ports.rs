@@ -88,6 +88,14 @@ impl ConsentOption {
     }
 }
 
+/// The file an upload ticket asks about: its base name and size, never
+/// its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketFile {
+    pub name: String,
+    pub bytes: u64,
+}
+
 /// What a ticket shows the approver. Closed: never page title or text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketRequest {
@@ -99,6 +107,8 @@ pub struct TicketRequest {
     pub action: ActionClass,
     /// Agent-supplied intent, displayed as such and never classified.
     pub element: Option<String>,
+    /// For an upload, the host-checked file it sends.
+    pub file: Option<TicketFile>,
     pub profile: TabProfile,
     /// The options offered, in display order.
     pub options: &'static [ConsentOption],

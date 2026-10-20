@@ -23,6 +23,7 @@
 
 import { useEffect, useRef } from 'react'
 import {
+  browserConsentFileLine,
   browserConsentOptionLabel,
   browserConsentProfileLabel,
   browserConsentSummary,
@@ -97,6 +98,14 @@ export function BrowserConsentCard({ consent }: BrowserConsentCardProps): React.
             <dd className="break-all font-mono text-muted-foreground">
               {browserConsentTargetLine(consent)}
             </dd>
+            {consent.file ? (
+              <>
+                <dt className="text-muted-foreground">File</dt>
+                <dd className="break-words font-medium text-foreground">
+                  {browserConsentFileLine(consent.file)}
+                </dd>
+              </>
+            ) : null}
             {consent.element ? (
               <>
                 <dt className="text-muted-foreground">Agent says</dt>

@@ -256,6 +256,7 @@ impl DesktopBrowserHost {
             session_id,
             project_id: &project_id,
             element: None,
+            file: None,
             profile: pending.profile,
             deadline: Deadline::after(budgets::CONSENT_WAIT),
         };

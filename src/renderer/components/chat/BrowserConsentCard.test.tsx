@@ -136,6 +136,15 @@ describe('BrowserConsentCard', () => {
     ])
   })
 
+  it('names the file an upload sends', () => {
+    render(
+      <BrowserConsentCard
+        consent={ticket({ action: 'upload', file: { name: 'report.pdf', bytes: 9 } })}
+      />
+    )
+    expect(screen.getByText('report.pdf (9 bytes)')).toBeInTheDocument()
+  })
+
   it('names the ephemeral profile when the agent tab runs in it', () => {
     render(<BrowserConsentCard consent={ticket({ profile: 'ephemeral' })} />)
     expect(

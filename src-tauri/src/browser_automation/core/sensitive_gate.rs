@@ -75,9 +75,10 @@ impl DesktopBrowserHost {
             ),
             _ => return Ok(()),
         };
-        if verb == Verb::Upload {
-            self.upload_source(session_id, args).await?;
-        }
+        let file = match verb {
+            Verb::Upload => Some(self.upload_source(session_id, args).await?.ticket_file()),
+            _ => None,
+        };
         let (label, facts) = match probe {
             Probe::Page if verb == Verb::NewTab => (None, SensitivityFacts::default()),
             Probe::Page => match self
@@ -125,6 +126,7 @@ impl DesktopBrowserHost {
             session_id,
             project_id: &project_id,
             element: call.element.as_deref(),
+            file,
             profile,
             deadline,
         };

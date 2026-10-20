@@ -41,6 +41,8 @@ export interface BrowserConsentTicket {
   action: BrowserConsentAction
   /** Agent-supplied intent: shown as such, never trusted. */
   element?: string
+  /** For an upload, the host-checked file it sends: base name and size. */
+  file?: { name: string; bytes: number }
   profile: 'global' | 'ephemeral'
   options: BrowserConsentOptionId[]
 }
@@ -92,6 +94,12 @@ export function parseBrowserConsentTicket(event: unknown): BrowserConsentTicket 
         : browser.targetUrl.length,
     action,
     element: typeof browser.element === 'string' ? browser.element : undefined,
+    file:
+      isRecord(browser.file) &&
+      typeof browser.file.name === 'string' &&
+      typeof browser.file.bytes === 'number'
+        ? { name: browser.file.name, bytes: browser.file.bytes }
+        : undefined,
     profile: browser.profile === 'ephemeral' ? 'ephemeral' : 'global',
     options: offered.length > 0 ? offered : [...OPTION_IDS]
   }

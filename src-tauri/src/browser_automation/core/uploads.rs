@@ -6,7 +6,10 @@
 //! Every check runs on the opened handle, never on the path the agent
 //! named: a symlink, or a swap of the path after it was checked, can only
 //! change which file was opened, and the handle's real location is what is
-//! checked against the root and the secrets deny-list.
+//! checked against the root and the secrets deny-list. A file with a
+//! second name (a hard link) is refused: that name may sit outside the
+//! root. The root is the session's project folder, and a root as broad as
+//! the user's home or a whole drive is refused.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
@@ -15,6 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::ports::TicketFile;
 use super::reply::engine_error;
 use super::tabs::RefNode;
 use super::teardown::session_dir;
@@ -65,11 +69,14 @@ const SECRET_SUFFIXES: [&str; 10] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadRefusal {
     NoProjectRoot,
+    /// The root is the user's home folder or a drive root.
+    BroadRoot,
     Missing,
     NotAFile,
     OutsideRoot,
     SecretFile,
     IgnoredFile,
+    HardLinked,
     TooLarge,
     /// The file changed while it was being copied.
     Changed,
@@ -80,11 +87,13 @@ impl UploadRefusal {
     pub fn reason(self) -> &'static str {
         match self {
             Self::NoProjectRoot => "no_project_root",
+            Self::BroadRoot => "project_root_too_broad",
             Self::Missing => "file_not_found",
             Self::NotAFile => "not_a_file",
             Self::OutsideRoot => "outside_project_root",
             Self::SecretFile => "secret_file",
             Self::IgnoredFile => "ignored_file",
+            Self::HardLinked => "hard_linked_file",
             Self::TooLarge => "file_too_large",
             Self::Changed => "file_changed",
             Self::Io => "file_unreadable",
@@ -94,6 +103,9 @@ impl UploadRefusal {
     fn message(self) -> &'static str {
         match self {
             Self::NoProjectRoot => "this session has no project folder to upload from",
+            Self::BroadRoot => {
+                "the session's folder is a home folder or a drive root; open a project folder to upload from it"
+            }
             Self::Missing => "no such file in the project",
             Self::NotAFile => "the upload path does not name a regular file",
             Self::OutsideRoot => "only files inside the project folder can be uploaded",
@@ -101,6 +113,7 @@ impl UploadRefusal {
                 "this file looks like a secret (keys, credentials, .env) and is never uploaded"
             }
             Self::IgnoredFile => "files the project's git ignores are never uploaded",
+            Self::HardLinked => "this file has another name (a hard link) and is never uploaded",
             Self::TooLarge => "the file is larger than the 50 MB upload limit",
             Self::Changed => "the file changed while it was being staged; try again",
             Self::Io => "the file could not be read",
@@ -166,6 +179,22 @@ pub struct OpenSource {
     name: String,
 }
 
+impl OpenSource {
+    /// What the consent ticket names: the base name and size, never the path.
+    pub fn ticket_file(&self) -> TicketFile {
+        TicketFile {
+            name: self.name.clone(),
+            bytes: self.len,
+        }
+    }
+}
+
+/// A root no project lives at: a drive or filesystem root, or the home
+/// folder itself.
+fn is_broad(canonical: &Path) -> bool {
+    canonical.parent().is_none() || files::home_dir().is_some_and(|home| home == canonical)
+}
+
 /// Keep the base name readable but harmless as one path component.
 fn staged_name(real: &Path) -> String {
     let name: String = real
@@ -196,6 +225,9 @@ pub fn open_source(root: &Path, requested: &str) -> Result<OpenSource, UploadRef
     // Opened through the root as given: a canonical Windows root is a
     // verbatim path, where `..` is a literal name.
     let canonical = std::fs::canonicalize(root).map_err(|_| UploadRefusal::NoProjectRoot)?;
+    if is_broad(&canonical) {
+        return Err(UploadRefusal::BroadRoot);
+    }
     let named = Path::new(requested);
     if names_a_stream(named) {
         return Err(UploadRefusal::NotAFile);
@@ -213,6 +245,9 @@ pub fn open_source(root: &Path, requested: &str) -> Result<OpenSource, UploadRef
     let meta = file.metadata().map_err(|_| UploadRefusal::Io)?;
     if !meta.is_file() {
         return Err(UploadRefusal::NotAFile);
+    }
+    if files::link_count(&file).map_err(|_| UploadRefusal::Io)? > 1 {
+        return Err(UploadRefusal::HardLinked);
     }
     let real = files::opened_path(&file).map_err(|_| UploadRefusal::Io)?;
     let rel = real

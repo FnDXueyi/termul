@@ -5,6 +5,41 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// The user's home folder, canonical.
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    std::fs::canonicalize(home?).ok()
+}
+
+/// How many directory entries name the open file. More than one means
+/// another name, maybe outside the folder the file was opened through,
+/// reaches the same bytes.
+#[cfg(windows)]
+pub fn link_count(file: &File) -> io::Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    // SAFETY: plain-data struct the call fills in; all-zero is valid.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is open for the life of `file`, and `info` is a
+    // valid out pointer.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(u64::from(info.nNumberOfLinks))
+}
+
+#[cfg(unix)]
+pub fn link_count(file: &File) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(file.metadata()?.nlink())
+}
+
 /// Where an open file really is, from its handle.
 #[cfg(windows)]
 pub fn opened_path(file: &File) -> io::Result<PathBuf> {

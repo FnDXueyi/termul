@@ -74,6 +74,11 @@ export function browserConsentTargetLine(
   return shortened ? `${ticket.targetUrl} (${ticket.targetUrlBytes} bytes)` : ticket.targetUrl
 }
 
+/** e.g. `report.pdf (9 bytes)`. */
+export function browserConsentFileLine(file: NonNullable<BrowserConsentTicket['file']>): string {
+  return `${file.name} (${file.bytes} bytes)`
+}
+
 const ORIGIN_OPTION_LABELS: Record<BrowserConsentOptionId, string> = {
   allow_session: 'Allow for this session',
   allow_project: 'Always allow for this project',

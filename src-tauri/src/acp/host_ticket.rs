@@ -140,7 +140,10 @@ fn ticket_title(ticket: &TicketRequest) -> String {
         }
         ActionClass::PasswordSubmit => format!("Submit a password on {origin}"),
         ActionClass::PaymentSubmit => format!("Submit payment details on {origin}"),
-        ActionClass::Upload => format!("Upload a file to {origin}"),
+        ActionClass::Upload => match &ticket.file {
+            Some(file) => format!("Upload {} ({} bytes) to {origin}", file.name, file.bytes),
+            None => format!("Upload a file to {origin}"),
+        },
         ActionClass::Download => format!("Download a file from {origin}"),
         ActionClass::TaintedExfil => format!("Send page data to {origin}"),
     }
@@ -214,6 +217,7 @@ fn request_payload(ticket: &TicketRequest) -> Value {
                 "targetUrlBytes": ticket.target_url.len(),
                 "action": action_id(ticket.action),
                 "element": ticket.element,
+                "file": ticket.file.as_ref().map(|f| json!({ "name": f.name, "bytes": f.bytes })),
                 "profile": profile_id(ticket.profile),
                 "projectId": ticket.project_id,
             },

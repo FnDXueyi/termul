@@ -14,7 +14,7 @@ use super::authz::{DenyReason, HopVerdict, OriginClass, PromptKind, SessionGrant
 use super::dispatch::Verb;
 use super::ports::{
     ActionClass, CanonicalOrigin, ConsentOption, PermissionRequest, PolicyRefusal, PolicyStore,
-    ProjectPolicyOp, TabProfile, TicketId, TicketOutcome, TicketRequest,
+    ProjectPolicyOp, TabProfile, TicketFile, TicketId, TicketOutcome, TicketRequest,
 };
 use super::sensitivity::{Sensitive, Taint};
 use super::stop::{stopped_error, StopLatch, StopToken};
@@ -62,6 +62,8 @@ pub struct SensitiveRequest<'a> {
     pub session_id: &'a str,
     pub project_id: &'a str,
     pub element: Option<&'a str>,
+    /// The file an upload sends, named on its ticket.
+    pub file: Option<TicketFile>,
     pub profile: TabProfile,
     pub deadline: Deadline,
 }
@@ -198,6 +200,7 @@ impl ConsentGate {
             target_url: req.url.to_string(),
             action: kind.action(),
             element: req.element.map(str::to_string),
+            file: None,
             profile: req.profile,
             options: &ConsentOption::ALL,
         };
@@ -347,6 +350,7 @@ impl ConsentGate {
             target_url: item.target.clone(),
             action: item.class,
             element: req.element.map(str::to_string),
+            file: req.file.clone().filter(|_| item.class == ActionClass::Upload),
             profile: req.profile,
             options: if offer_project {
                 &ConsentOption::ALL

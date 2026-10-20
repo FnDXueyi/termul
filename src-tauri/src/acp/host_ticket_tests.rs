@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
-use crate::browser_automation::core::ports::CanonicalOrigin;
+use crate::browser_automation::core::ports::{CanonicalOrigin, TicketFile};
 use crate::web::sink::AcpEvent;
 
 #[derive(Default)]
@@ -46,6 +46,7 @@ fn ticket(session: &str, url: &str) -> TicketRequest {
         target_url: url.into(),
         action: ActionClass::Navigate,
         element: Some("Docs link".into()),
+        file: None,
         profile: TabProfile::Global,
         options: &ConsentOption::ALL,
     }
@@ -253,6 +254,31 @@ async fn an_answer_faster_than_the_floor_is_refused() {
         Duration::from_millis(750),
         "the production floor"
     );
+}
+
+#[tokio::test]
+async fn an_upload_ticket_names_the_file_by_base_name_and_size() {
+    let (recorder, tickets) = tickets(Duration::ZERO);
+    let request = TicketRequest {
+        action: ActionClass::Upload,
+        file: Some(TicketFile {
+            name: "report.pdf".into(),
+            bytes: 9,
+        }),
+        ..ticket("s1", "https://files.example/upload")
+    };
+    let waiting = tokio::spawn({
+        let tickets = tickets.clone();
+        async move { tickets.request(request, Duration::from_secs(5)).await }
+    });
+    raised(&tickets, &recorder).await;
+    let payload = recorder.0.lock()[0].2.clone();
+    assert_eq!(payload["toolCall"]["title"], "Upload report.pdf (9 bytes) to https://files.example");
+    assert_eq!(
+        payload["_meta"]["termul"]["browser"]["file"],
+        json!({ "name": "report.pdf", "bytes": 9 })
+    );
+    waiting.abort();
 }
 
 #[tokio::test]

@@ -72,6 +72,7 @@ fn raise(rig: &Rig) -> (String, tokio::task::JoinHandle<TicketOutcome>) {
         target_url: "https://docs.example.com/start".into(),
         action: ActionClass::Navigate,
         element: None,
+        file: None,
         profile: TabProfile::Global,
         options: &ConsentOption::ALL,
     };

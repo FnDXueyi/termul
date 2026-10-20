@@ -1721,12 +1721,15 @@ pub fn run() {
             };
             let root_of: browser_automation::core::RootResolver = {
                 let persistence = session_persistence.clone();
+                let registry = Arc::clone(&project_registry);
                 Arc::new(move |session_id| {
-                    persistence
-                        .as_ref()
-                        .and_then(|p| p.metadata(session_id).ok())
-                        .map(|m| std::path::PathBuf::from(m.cwd))
-                        .filter(|cwd| cwd.is_absolute())
+                    let meta = persistence.as_ref()?.metadata(session_id).ok()?;
+                    // A session of a project uploads from the project folder,
+                    // wherever its shell started.
+                    match meta.project_id {
+                        Some(project_id) => registry.canonical_root(&project_id),
+                        None => Some(std::path::PathBuf::from(meta.cwd)).filter(|cwd| cwd.is_absolute()),
+                    }
                 })
             };
             let browser_host = browser_automation::DesktopBrowserHost::new(

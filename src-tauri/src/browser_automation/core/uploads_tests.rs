@@ -201,3 +201,31 @@ fn staged_names_keep_the_base_name_and_drop_path_tricks() {
     assert_eq!(staged_name(Path::new("/p/a<b>|c.txt")), "a_b__c.txt");
     assert_eq!(staged_name(Path::new("/p/...")), "upload");
 }
+
+#[test]
+fn a_hard_link_to_a_file_outside_the_root_is_refused() {
+    let p = project();
+    let linked = p.dir.path().join("docs/linked.txt");
+    fs::hard_link(p.outside.path().join("secret.txt"), &linked).unwrap();
+    assert_eq!(refusal(p.dir.path(), "docs/linked.txt"), Some(UploadRefusal::HardLinked));
+}
+
+#[test]
+fn a_drive_root_is_never_an_upload_root() {
+    let p = project();
+    let drive = p.dir.path().ancestors().last().unwrap().to_path_buf();
+    assert_eq!(refusal(&drive, "anything.txt"), Some(UploadRefusal::BroadRoot));
+}
+
+#[test]
+fn the_ticket_names_the_opened_file_by_base_name_and_size() {
+    let p = project();
+    let source = open_source(p.dir.path(), "docs/report.pdf").unwrap();
+    assert_eq!(
+        source.ticket_file(),
+        TicketFile {
+            name: "report.pdf".into(),
+            bytes: 16,
+        }
+    );
+}

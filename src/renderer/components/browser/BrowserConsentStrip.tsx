@@ -23,6 +23,7 @@
 
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import {
+  browserConsentFileLine,
   browserConsentOptionLabel,
   browserConsentProfileLabel,
   browserConsentSummary,
@@ -115,6 +116,11 @@ export function BrowserConsentStrip({
         <span className="block truncate font-mono text-muted-foreground" title={first.targetUrl}>
           {browserConsentTargetLine(first)}
         </span>
+        {first.file ? (
+          <span className="block truncate text-foreground">
+            File: {browserConsentFileLine(first.file)}
+          </span>
+        ) : null}
         <span className="block truncate text-muted-foreground">
           {first.element ? `Agent says: "${first.element}" · ` : ''}
           {browserConsentProfileLabel(first.profile)}

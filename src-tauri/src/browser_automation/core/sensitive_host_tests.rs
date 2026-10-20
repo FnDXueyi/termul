@@ -2,7 +2,7 @@
 //! helper's facts, identity-scoped pre-approvals, staged uploads and
 //! host-named downloads.
 
-use super::super::ports::{ActionClass, AppPolicyOp, ProjectPolicyOp};
+use super::super::ports::{ActionClass, AppPolicyOp, ProjectPolicyOp, TicketFile};
 use super::super::test_support::InMemoryPolicyStore;
 use super::*;
 use crate::acp::browser_policy::{
@@ -339,6 +339,14 @@ async fn an_upload_stages_the_project_file_and_prompts_unless_app_approved() {
         (json!(ERR_CONFIRMATION), json!("unattended"))
     );
     assert_eq!(r.ticket_actions()[0].0, ActionClass::Upload);
+    assert_eq!(
+        r.tickets.requests.lock()[0].0.file,
+        Some(TicketFile {
+            name: "report.pdf".into(),
+            bytes: 9,
+        }),
+        "the ticket names the file it would send"
+    );
     assert!(r.h.engine.files_set.lock().is_empty());
 
     r.preapprove_project(ActionClass::Upload).await;
