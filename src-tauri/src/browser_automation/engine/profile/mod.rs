@@ -20,9 +20,18 @@
 //! | WebView2 | generation folder, one environment shared by object | per-session folder + InPrivate |
 //! | WKWebView | data store named by the generation UUID (macOS 14+) | non-persistent data store |
 //! | WebKitGTK | generation data directory (one context per process) | ephemeral context |
+//!
+//! Agent tabs never show the engine's save-password bubble or offer saved
+//! form data, since that is interface noise in a tab an agent drives.
+//! Typing and submitting passwords stays unrestricted. WebView2 has both
+//! switches and they are turned off per tab. WKWebView and WebKitGTK have
+//! no password manager or autofill to turn off. Cookies are never cleared
+//! by the app: the profile belongs to the user.
 
 #[cfg(target_os = "windows")]
 mod webview2;
+#[cfg(target_os = "windows")]
+mod webview2_settings;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -207,12 +216,33 @@ impl AgentProfiles {
     }
 
     /// The engine confirmed `webview`: share its environment with the next
-    /// tabs of the same folder.
-    pub async fn built(&self, webview: &Webview, label: &str) {
+    /// tabs of the same folder, and apply the agent-tab settings to a tab
+    /// that is on an agent profile.
+    pub async fn built(&self, webview: &Webview, label: &str, store: &DataStore) {
         #[cfg(target_os = "windows")]
         self.environments.adopt(webview, label).await;
         #[cfg(not(target_os = "windows"))]
-        let _ = (webview, label);
+        let _ = label;
+        if *store == DataStore::App {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let applied = webview.with_webview(|platform| {
+                // SAFETY: COM call on the UI thread that owns the controller.
+                let Ok(core) = (unsafe { platform.controller().CoreWebView2() }) else {
+                    return;
+                };
+                if !webview2_settings::disable_credential_prompts(&core) {
+                    log::warn!("[browser-profile] password and autofill prompts stay as the runtime defaults");
+                }
+            });
+            if applied.is_err() {
+                log::warn!("[browser-profile] agent tab settings not applied");
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = webview;
     }
 
     /// `label`'s webview is gone, or was never built.
