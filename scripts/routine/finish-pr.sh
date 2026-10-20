@@ -87,7 +87,14 @@ if ! bun run test > "$WT/vitest-branch.txt" 2>&1; then
   # suite, pass standalone, on both dev and fix branches).
   FAIL_FILES=$(grep -oE "FAIL [^ ]+\.test\.[tj]sx?" "$WT/vitest-branch.txt" | awk '{print $2}' | sort -u || true)
   if [ -n "$FAIL_FILES" ]; then
-    bun vitest run $FAIL_FILES > "$WT/vitest-retry.txt" 2>&1 || true
+    # Retry each failing file ISOLATED (one vitest process at a time):
+    # a batched retry reproduces the same load-order conditions and flakes
+    # the same way (proven: UpdateAvailableToast failed full suite AND
+    # batched retry, passed isolated).
+    : > "$WT/vitest-retry.txt"
+    for f in $FAIL_FILES; do
+      bun vitest run "$f" >> "$WT/vitest-retry.txt" 2>&1 || true
+    done
     RETRY_FAILED=$(grep -oE "FAIL [^ ]+\.test\.[tj]sx?" "$WT/vitest-retry.txt" | awk '{print $2}' | sort -u || true)
     STABLE_FAILED=$(comm -12 <(echo "$FAIL_FILES") <(echo "$RETRY_FAILED") || true)
     if [ -n "$STABLE_FAILED" ] || [ ! -s "$WT/vitest-retry.txt" ]; then
