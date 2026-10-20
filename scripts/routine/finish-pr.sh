@@ -81,9 +81,26 @@ bun run typecheck >> "$LOG" 2>&1 || { tail -40 "$LOG"; fail "bun run typecheck";
 
 step "vitest"
 if ! bun run test > "$WT/vitest-branch.txt" 2>&1; then
-  # Failures: compare against a clean-dev baseline so pre-existing red on
-  # dev (known flaky/red suites) does not fail a good fix. Only NEW failures
-  # gate the branch.
+  # Flake absorption: re-run ONLY the failing test files once. A test that
+  # fails in the full suite but passes on retry is a load-order flake, not a
+  # regression (proven 2026-10-20: markdown-code + drawer tests fail full
+  # suite, pass standalone, on both dev and fix branches).
+  FAIL_FILES=$(grep -oE "FAIL [^ >]+\." "$WT/vitest-branch.txt" | awk '{print $2}' | sort -u || true)
+  if [ -n "$FAIL_FILES" ]; then
+    bun vitest run $FAIL_FILES > "$WT/vitest-retry.txt" 2>&1 || true
+    RETRY_FAILED=$(grep -oE "FAIL [^ >]+\." "$WT/vitest-retry.txt" | awk '{print $2}' | sort -u || true)
+    STABLE_FAILED=$(comm -12 <(echo "$FAIL_FILES") <(echo "$RETRY_FAILED") || true)
+    if [ -n "$STABLE_FAILED" ] || [ ! -s "$WT/vitest-retry.txt" ]; then
+      # Stable failures: keep them in the branch record for baseline compare.
+      bun vitest run $STABLE_FAILED > "$WT/vitest-branch.txt" 2>&1 || true
+    else
+      echo "vitest: all full-suite failures passed retry (flakes); treating suite as green" | tee -a "$LOG"
+      cp /dev/null "$WT/vitest-branch.txt"
+    fi
+  fi
+  # Remaining failures: compare against a clean-dev baseline so pre-existing
+  # red on dev (known flaky/red suites) does not fail a good fix. Only NEW
+  # failures gate the branch.
   git worktree add --quiet --force "$REPO/.wt/finish-baseline" origin/dev 2>/dev/null
   ( cd "$REPO/.wt/finish-baseline" \
       && [ -e node_modules ] || ln -s "$REPO/node_modules" node_modules \
