@@ -51,8 +51,8 @@ Claim protocol, in this exact order:
 2. Filter to dev-ready candidates: BUG-labeled issues, OR any issue carrying the to-agent label. Then EXCLUDE any issue that already has an open PR (gh pr list --state open --json headRefName and check for Closes #<n> in bodies) or a live routine/* branch on origin (git ls-remote --heads origin 'routine/*'). Never double-claim.
 3. Pick exactly ONE issue, highest priority label first, then oldest.
 4. IMMEDIATELY claim it: git worktree is yours (.wt/worker-$1); from it, checkout -b routine/<issue>-<slug> from origin/dev, commit an empty claim, push, and open a DRAFT PR titled with the conventional-commit subject suffixed with [skip ci], body from .github/PULL_REQUEST_TEMPLATE.md with Closes #<n> and a WIP claim note.
-5. Then implement the fix, run the full local gate (bun run ci, bun run typecheck, bun run test, cargo clippy --all-targets -- -D warnings, cargo test in src-tauri). Be fast: think briefly, act, run the gate, iterate on failures only. Do not deliberate: your budget is one issue end to end.
-6. Push the fix, strip [skip ci] from the title, mark the PR ready, and comment the PR link on the issue.
+5. Then implement the fix and COMMIT it locally (conventional-commit message). Do NOT run the gate commands yourself and do NOT push: the deterministic finisher owns that.
+6. Invoke the finisher: bash scripts/routine/finish-pr.sh routine/<issue>-<slug> --push (run it from your worktree; it gates in its own worktree, pushes, strips [skip ci], marks the PR ready, and comments the links). If it fails, read goal-routine-runs/_automation/gate-failures/<branch>.log, fix ONLY what the log shows, commit, and re-invoke the finisher. Repeat until green or your budget ends; never bypass the finisher.
 
 Hard rules: never force-push, never merge, never close issues, never add to-agent, never touch branches other than your own routine/<issue>-<slug>, never edit files outside your worktree. If no claimable issue exists, exit silently. If the repro fails or the gate fails, comment that on the issue and close your own draft PR as not planned.
 PROMPT
