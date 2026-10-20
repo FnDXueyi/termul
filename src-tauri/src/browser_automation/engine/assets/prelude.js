@@ -181,13 +181,19 @@ function center(el) {
   var off = frameOffset(el);
   return { cx: off.x + rc.left + rc.width / 2, cy: off.y + rc.top + rc.height / 2, w: rc.width, h: rc.height };
 }
+// Read through the prototype: an element named activeElement shadows the
+// document's own property.
+var ACTIVE = Object.getOwnPropertyDescriptor(Document.prototype, 'activeElement');
+function activeOf(doc) {
+  return ACTIVE ? ACTIVE.get.call(doc) : doc.activeElement;
+}
 function deepActive() {
-  var a = document.activeElement;
+  var a = activeOf(document);
   for (;;) {
     var inner = null;
     if (a && a.shadowRoot && a.shadowRoot.activeElement) inner = a.shadowRoot.activeElement;
     else if (a && a.tagName === 'IFRAME') {
-      try { inner = a.contentDocument && a.contentDocument.activeElement; } catch (e) { inner = null; }
+      try { inner = a.contentDocument && activeOf(a.contentDocument); } catch (e) { inner = null; }
       if (inner && inner === inner.ownerDocument.body) inner = null;
     }
     if (!inner || inner === a) return a;

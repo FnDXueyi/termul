@@ -17,7 +17,7 @@ fn password_form() -> SensitivityFacts {
     SensitivityFacts {
         frame_origin: Some("https://shop.example".into()),
         target_in_form: true,
-        form_has_password: true,
+        region_has_password: true,
         is_submitter: true,
         form_action: Some("https://shop.example/session".into()),
         ..SensitivityFacts::default()
@@ -61,31 +61,106 @@ fn submitting_a_password_form_by_click_or_enter_is_a_password_submit() {
 }
 
 #[test]
-fn acting_in_a_password_form_without_submitting_it_is_not_sensitive() {
+fn typing_into_a_credential_field_without_submitting_it_is_not_sensitive() {
     let field = SensitivityFacts {
         is_submitter: false,
+        is_text_entry: true,
         ..password_form()
     };
     assert!(classify(Gesture::Click, &field, &scene(false)).is_empty());
     assert!(classify(Gesture::Fill, &field, &scene(false)).is_empty());
-    assert!(classify(Gesture::Type("hunter2"), &field, &scene(false)).is_empty());
+    assert!(classify(Gesture::Type("hunter 2"), &field, &scene(false)).is_empty());
     assert!(classify(Gesture::Key("Tab"), &field, &scene(false)).is_empty());
+    assert!(classify(Gesture::Key("Space"), &field, &scene(false)).is_empty());
+}
+
+const PASSWORD_SUBMIT: (ActionClass, Option<&str>, bool) = (
+    ActionClass::PasswordSubmit,
+    Some("https://shop.example"),
+    false,
+);
+
+#[test]
+fn every_way_of_activating_a_control_in_a_password_form_is_a_password_submit() {
+    let submit = password_form();
+    let control = SensitivityFacts {
+        is_submitter: false,
+        ..password_form()
+    };
+    for (gesture, facts, what) in [
+        (Gesture::Click, &submit, "check on a submit styled as a switch"),
+        (Gesture::Click, &control, "a button whose script submits the form"),
+        (Gesture::Key("Space"), &submit, "Space on a focused submit"),
+        (Gesture::Key(" "), &submit, "a space key on a focused submit"),
+        (Gesture::Type(" "), &submit, "typing a space onto a focused submit"),
+        (Gesture::Select, &control, "a select the page submits on change"),
+        (Gesture::Fill, &control, "fill on a select"),
+    ] {
+        assert_eq!(
+            summary(&classify(gesture, facts, &scene(false))),
+            vec![PASSWORD_SUBMIT],
+            "{what}"
+        );
+    }
 }
 
 #[test]
-fn enter_outside_a_form_submits_nothing() {
-    let facts = SensitivityFacts {
-        form_has_password: true,
+fn a_formless_login_is_a_password_submit() {
+    let spa = SensitivityFacts {
+        frame_origin: Some("https://shop.example".into()),
+        region_has_password: true,
         ..SensitivityFacts::default()
     };
-    assert!(classify(Gesture::Key("Enter"), &facts, &scene(false)).is_empty());
+    for gesture in [Gesture::Click, Gesture::Key("Enter"), Gesture::Type("hunter2\n")] {
+        assert_eq!(
+            summary(&classify(gesture, &spa, &scene(false))),
+            vec![PASSWORD_SUBMIT],
+            "{gesture:?}"
+        );
+    }
+    let field = SensitivityFacts {
+        is_text_entry: true,
+        ..spa
+    };
+    assert!(classify(Gesture::Fill, &field, &scene(false)).is_empty());
+    assert!(classify(Gesture::Click, &field, &scene(false)).is_empty());
+}
+
+#[test]
+fn enter_outside_a_credential_region_submits_nothing() {
+    let field = SensitivityFacts {
+        is_text_entry: true,
+        ..SensitivityFacts::default()
+    };
+    assert!(classify(Gesture::Key("Enter"), &field, &scene(false)).is_empty());
+    assert!(classify(Gesture::Click, &SensitivityFacts::default(), &scene(false)).is_empty());
+}
+
+#[test]
+fn after_reading_a_page_enter_or_space_on_a_data_carrying_link_is_exfiltration() {
+    let link = SensitivityFacts {
+        link_target: Some("https://collect.example/x?d=secret".into()),
+        ..SensitivityFacts::default()
+    };
+    for gesture in [Gesture::Key("Enter"), Gesture::Key("Space"), Gesture::Click] {
+        assert_eq!(
+            summary(&classify(gesture, &link, &scene(true))),
+            vec![(
+                ActionClass::TaintedExfil,
+                Some("https://collect.example"),
+                false
+            )],
+            "{gesture:?}"
+        );
+    }
+    assert!(classify(Gesture::Key("Tab"), &link, &scene(true)).is_empty());
 }
 
 #[test]
 fn a_card_form_submit_is_a_payment_submit() {
     let facts = SensitivityFacts {
-        form_has_password: false,
-        form_has_payment: true,
+        region_has_password: false,
+        region_has_payment: true,
         ..password_form()
     };
     assert_eq!(
@@ -171,7 +246,7 @@ fn after_reading_a_page_a_data_carrying_navigation_to_another_origin_is_exfiltra
 #[test]
 fn after_reading_a_page_a_submit_to_another_origin_is_exfiltration() {
     let facts = SensitivityFacts {
-        form_has_password: false,
+        region_has_password: false,
         form_action: Some("https://collect.example/post".into()),
         ..password_form()
     };
@@ -297,16 +372,17 @@ fn all_facts() -> Vec<SensitivityFacts> {
         Some("https://collect.example/a?x=1".to_string()),
     ];
     let mut out = Vec::new();
-    for bits in 0u8..32 {
+    for bits in 0u8..64 {
         for action in &actions {
             for link in &links {
                 out.push(SensitivityFacts {
                     frame_origin: Some("https://shop.example".into()),
                     target_in_form: bits & 1 != 0,
-                    form_has_password: bits & 2 != 0,
-                    form_has_payment: bits & 4 != 0,
+                    region_has_password: bits & 2 != 0,
+                    region_has_payment: bits & 4 != 0,
                     is_submitter: bits & 8 != 0,
                     is_file_input: bits & 16 != 0,
+                    is_text_entry: bits & 32 == 0,
                     form_action: action.clone(),
                     link_target: link.clone(),
                 });
@@ -329,10 +405,11 @@ fn at_most(a: &SensitivityFacts, b: &SensitivityFacts) -> bool {
     ];
     let le = |x: bool, y: bool| !x || y;
     le(a.target_in_form, b.target_in_form)
-        && le(a.form_has_password, b.form_has_password)
-        && le(a.form_has_payment, b.form_has_payment)
+        && le(a.region_has_password, b.region_has_password)
+        && le(a.region_has_payment, b.region_has_payment)
         && le(a.is_submitter, b.is_submitter)
         && le(a.is_file_input, b.is_file_input)
+        && le(b.is_text_entry, a.is_text_entry)
         && rank(&actions, &a.form_action) <= rank(&actions, &b.form_action)
         && a.link_target == b.link_target
 }
@@ -347,8 +424,12 @@ fn classification_is_monotonic_in_every_fact_taint_and_trust() {
     let gestures = [
         Gesture::Click,
         Gesture::Key("Enter"),
+        Gesture::Key("Space"),
+        Gesture::Key("Tab"),
         Gesture::Type("x\n"),
+        Gesture::Type("x"),
         Gesture::Fill,
+        Gesture::Select,
         Gesture::Upload,
     ];
     let scenes = [

@@ -305,6 +305,15 @@ impl ConsentGate {
         req: &SensitiveRequest<'_>,
         item: &Sensitive,
     ) -> Result<(), BrowserError> {
+        // Signing in is the agent's to do unless the user asked to confirm
+        // it. A pinned item stands for any credential submit, payments
+        // included, so it always asks.
+        if item.class == ActionClass::PasswordSubmit
+            && !item.pinned
+            && !self.policy.asks_before_password_submit().await
+        {
+            return Ok(());
+        }
         let phrase = class_phrase(item.class);
         let Some(origin) = item.origin.clone() else {
             return Err(confirmation(

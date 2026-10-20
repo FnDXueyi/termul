@@ -1,56 +1,100 @@
+// A form or document element named like one of their own properties
+// (<input name=elements>, <img name=URL>) shadows that property in every
+// script world. Reads on them go through the prototypes' own accessors.
+function getter(proto, name) {
+  var d = Object.getOwnPropertyDescriptor(proto, name);
+  return function (obj) { return d.get.call(obj); };
+}
+var formElements = getter(HTMLFormElement.prototype, 'elements');
+var tagOf = getter(Element.prototype, 'tagName');
+var shadowOf = getter(Element.prototype, 'shadowRoot');
+var ownerDocOf = getter(Node.prototype, 'ownerDocument');
+var baseOf = getter(Node.prototype, 'baseURI');
+var urlOf = getter(Document.prototype, 'URL');
+var bodyOf = getter(Document.prototype, 'body');
+var attr = Element.prototype.getAttribute;
+var closest = Element.prototype.closest;
+var QSA = { 1: Element.prototype.querySelectorAll, 9: Document.prototype.querySelectorAll, 11: DocumentFragment.prototype.querySelectorAll };
+function all(root, selector) {
+  return Array.prototype.slice.call(QSA[root.nodeType].call(root, selector));
+}
 var target = p.path ? locate(p.path) : deepActive();
 if (p.path && !target) return STALE;
 var facts = {
   frameOrigin: location.origin,
   targetInForm: false,
-  formHasPassword: false,
-  formHasPayment: false,
+  regionHasPassword: false,
+  regionHasPayment: false,
   isSubmitter: false,
+  isTextEntry: false,
   isFileInput: false,
   formAction: null,
   linkTarget: null
 };
-if (!target || target === target.ownerDocument.body) return facts;
+if (!target) return facts;
+var doc = ownerDocOf(target);
+if (target === bodyOf(doc)) return facts;
+var tag = tagOf(target);
 // Keys without a ref reach focus inside a frame these helpers cannot read;
 // what is focused there is unknown, so it counts as a credential form.
 var opaque = false;
-if (!p.path && (target.tagName === 'IFRAME' || target.tagName === 'FRAME')) {
+if (!p.path && (tag === 'IFRAME' || tag === 'FRAME')) {
   try { opaque = !target.contentDocument; } catch (e) { opaque = true; }
 }
 if (opaque) {
-  facts.targetInForm = facts.formHasPassword = facts.formHasPayment = facts.isSubmitter = true;
+  facts.targetInForm = facts.regionHasPassword = facts.regionHasPayment = facts.isSubmitter = true;
   return facts;
 }
-var doc = target.ownerDocument;
 function absolute(href) {
-  try { return new URL(href, doc.baseURI).href; } catch (e) { return null; }
+  try { return new URL(href, baseOf(doc)).href; } catch (e) { return null; }
 }
 function tokens(el) {
-  return (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+  return (attr.call(el, 'autocomplete') || '').toLowerCase().split(/\s+/);
 }
 var CARD_NAME = /card.?num|cc.?num|cvc|cvv|csc|security.?code|expir/i;
+var NOT_TEXT = ['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'file', 'color', 'range', 'hidden'];
 function isPassword(el) {
-  if (el.tagName === 'INPUT' && inputType(el) === 'password') return true;
-  return tokens(el).some(function (t) { return t === 'current-password' || t === 'new-password'; });
+  if (tagOf(el) === 'INPUT' && inputType(el) === 'password') return true;
+  return tokens(el).some(function (t) {
+    return t === 'current-password' || t === 'new-password' || t === 'one-time-code';
+  });
 }
 function isPayment(el) {
   if (tokens(el).some(function (t) { return t.indexOf('cc-') === 0; })) return true;
-  return CARD_NAME.test((el.getAttribute('name') || '') + ' ' + (el.id || ''));
+  return CARD_NAME.test((attr.call(el, 'name') || '') + ' ' + (attr.call(el, 'id') || ''));
 }
-var tag = target.tagName;
+var FIELDS = 'input,select,textarea,[autocomplete]';
+// Fields under root, open shadow roots included.
+function deepFields(root, out) {
+  Array.prototype.push.apply(out, all(root, FIELDS));
+  all(root, '*').forEach(function (el) {
+    var shadow = shadowOf(el);
+    if (shadow) deepFields(shadow, out);
+  });
+  return out;
+}
 var type = tag === 'INPUT' ? inputType(target) : '';
 facts.isFileInput = type === 'file';
-var form = target.form || (target.closest ? target.closest('form') : null);
+facts.isTextEntry = (tag === 'INPUT' && NOT_TEXT.indexOf(type) < 0) || tag === 'TEXTAREA' ||
+  !!target.isContentEditable;
+var form = ('form' in target && target.form) || closest.call(target, 'form');
+var region;
 if (form) {
   facts.targetInForm = true;
-  var fields = Array.prototype.slice.call(form.elements || []);
-  facts.formHasPassword = fields.some(isPassword);
-  facts.formHasPayment = fields.some(isPayment);
-  facts.isSubmitter = (tag === 'BUTTON' && (target.getAttribute('type') || 'submit').toLowerCase() === 'submit') ||
+  region = Array.prototype.slice.call(formElements(form)).concat(deepFields(form, []));
+  facts.isSubmitter = (tag === 'BUTTON' && (attr.call(target, 'type') || 'submit').toLowerCase() === 'submit') ||
     (tag === 'INPUT' && (type === 'submit' || type === 'image'));
-  var action = (facts.isSubmitter && target.getAttribute('formaction')) || form.getAttribute('action') || doc.URL;
+  var action = (facts.isSubmitter && attr.call(target, 'formaction')) || attr.call(form, 'action') || urlOf(doc);
   facts.formAction = absolute(action);
+} else {
+  // Outside a form, a script login or checkout reads its fields from the
+  // page: every shown field no form owns is in reach.
+  region = deepFields(doc, []).filter(function (el) {
+    return !('form' in el && el.form) && !closest.call(el, 'form') && visible(el);
+  });
 }
-var link = target.closest ? target.closest('a[href],area[href]') : null;
-if (link) facts.linkTarget = absolute(link.getAttribute('href'));
+facts.regionHasPassword = region.some(isPassword);
+facts.regionHasPayment = region.some(isPayment);
+var link = closest.call(target, 'a[href],area[href]');
+if (link) facts.linkTarget = absolute(attr.call(link, 'href'));
 return facts;

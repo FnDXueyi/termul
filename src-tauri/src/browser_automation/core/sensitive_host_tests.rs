@@ -98,6 +98,11 @@ impl Rig {
         self.policy.apply_project("p1", revision, op).await.unwrap();
     }
 
+    /// Turn the app's "ask before an agent submits a password" on.
+    fn ask_before_passwords(&self) {
+        self.policy.ask_password.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     async fn preapprove_app(&self, class: ActionClass) {
         let op = AppPolicyOp::AddPreapproval(AppPreapproval::new(class, origin()).unwrap());
         let revision = self.policy.app().await.unwrap().revision;
@@ -115,15 +120,37 @@ fn password_form() -> Value {
     json!({
         "frameOrigin": ORIGIN,
         "targetInForm": true,
-        "formHasPassword": true,
+        "regionHasPassword": true,
         "isSubmitter": true,
         "formAction": "http://127.0.0.1:4100/session",
     })
 }
 
+fn payment_form() -> Value {
+    json!({
+        "frameOrigin": ORIGIN,
+        "targetInForm": true,
+        "regionHasPayment": true,
+        "isSubmitter": true,
+        "formAction": "http://127.0.0.1:4100/pay",
+    })
+}
+
 #[tokio::test]
-async fn a_password_submit_prompts_once_or_deny_and_an_unanswered_one_is_refused() {
+async fn a_password_submit_runs_without_asking_unless_the_app_asks_first() {
     let r = rig(vec![]);
+    r.open(LOGIN).await;
+    r.facts(password_form());
+    let reply = r.h.call("click", json!({ "ref": "@e1" })).await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(r.ticket_actions().is_empty(), "nobody was asked");
+    assert_eq!(r.h.engine.clicks.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn an_asked_password_submit_prompts_once_or_deny_and_an_unanswered_one_is_refused() {
+    let r = rig(vec![]);
+    r.ask_before_passwords();
     r.open(LOGIN).await;
     r.facts(password_form());
     let reply = r.h.call("click", json!({ "ref": "@e1" })).await;
@@ -141,9 +168,28 @@ async fn a_password_submit_prompts_once_or_deny_and_an_unanswered_one_is_refused
 }
 
 #[tokio::test]
+async fn check_uncheck_and_select_option_in_a_payment_form_prompt_before_acting() {
+    let r = rig(vec![]);
+    r.open(LOGIN).await;
+    r.facts(payment_form());
+    for (verb, args) in [
+        ("check", json!({ "ref": "@e1" })),
+        ("uncheck", json!({ "ref": "@e1" })),
+        ("select_option", json!({ "ref": "@e1", "value": "a" })),
+    ] {
+        let reply = r.h.call(verb, args).await;
+        assert_eq!(reply["code"], ERR_CONFIRMATION, "{verb}: {reply}");
+    }
+    let classes: Vec<ActionClass> = r.ticket_actions().into_iter().map(|(c, _)| c).collect();
+    assert_eq!(classes, vec![ActionClass::PaymentSubmit; 3]);
+    assert!(r.h.engine.clicks.lock().is_empty(), "nothing was clicked");
+}
+
+#[tokio::test]
 async fn an_allowed_password_submit_runs_and_asks_again_next_time() {
     let allow = TicketOutcome::Answered(ConsentOption::AllowSession);
     let r = rig(vec![allow, allow]);
+    r.ask_before_passwords();
     r.open(LOGIN).await;
     r.facts(password_form());
     assert_eq!(r.h.call("click", json!({ "ref": "@e1" })).await["ok"], true);
@@ -161,11 +207,12 @@ async fn an_allowed_password_submit_runs_and_asks_again_next_time() {
 }
 
 #[tokio::test]
-async fn global_identity_tabs_always_prompt_for_password_and_payment_submits() {
+async fn global_identity_tabs_ignore_project_pre_approvals_of_submits() {
     let r = rig(vec![]);
+    r.ask_before_passwords();
     r.open(LOGIN).await;
+    assert!(AppPreapproval::new(ActionClass::PaymentSubmit, origin()).is_err());
     for class in [ActionClass::PasswordSubmit, ActionClass::PaymentSubmit] {
-        assert!(AppPreapproval::new(class, origin()).is_err(), "{class:?}");
         r.preapprove_project(class).await;
     }
     r.facts(password_form());
@@ -173,10 +220,7 @@ async fn global_identity_tabs_always_prompt_for_password_and_payment_submits() {
         r.h.call("click", json!({ "ref": "@e1" })).await["code"],
         ERR_CONFIRMATION
     );
-    r.facts(json!({
-        "targetInForm": true, "formHasPayment": true, "isSubmitter": true,
-        "formAction": "http://127.0.0.1:4100/pay",
-    }));
+    r.facts(payment_form());
     assert_eq!(
         r.h.call("click", json!({ "ref": "@e1" })).await["code"],
         ERR_CONFIRMATION
@@ -200,6 +244,7 @@ async fn global_identity_tabs_always_prompt_for_password_and_payment_submits() {
 #[tokio::test]
 async fn ephemeral_tabs_honour_project_pre_approvals_and_always_allow_writes_one() {
     let r = rig(vec![TicketOutcome::Answered(ConsentOption::AllowProject)]);
+    r.ask_before_passwords();
     r.open_ephemeral(LOGIN).await;
     r.facts(password_form());
     assert_eq!(r.h.call("click", json!({ "ref": "@e1" })).await["ok"], true);
@@ -341,7 +386,7 @@ async fn a_submit_inside_a_cross_origin_frame_is_classified_from_that_frame() {
     *r.h.engine.frame_sensitivity.lock() = json!({
         "frameOrigin": PAY,
         "targetInForm": true,
-        "formHasPayment": true,
+        "regionHasPayment": true,
         "isSubmitter": true,
         "formAction": "https://pay.example/charge",
     });

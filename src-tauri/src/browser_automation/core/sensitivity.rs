@@ -17,6 +17,10 @@ use tauri::Url;
 use super::ports::{ActionClass, CanonicalOrigin};
 
 /// What the sensitivity helper observed about an action's target element.
+///
+/// The region is the target's form, or, for a target outside every form,
+/// the shown fields of its document that no form owns: a script login or
+/// checkout submits whatever its page holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SensitivityFacts {
@@ -24,12 +28,15 @@ pub struct SensitivityFacts {
     pub frame_origin: Option<String>,
     /// The element belongs to a form.
     pub target_in_form: bool,
-    /// The form has a password field.
-    pub form_has_password: bool,
-    /// The form has a payment-card field.
-    pub form_has_payment: bool,
+    /// The region has a password or one-time-code field.
+    pub region_has_password: bool,
+    /// The region has a payment-card field.
+    pub region_has_payment: bool,
     /// Activating the element submits its form.
     pub is_submitter: bool,
+    /// The element takes typed text, so a click only focuses it. Unknown
+    /// counts as an element a click or key activates.
+    pub is_text_entry: bool,
     pub is_file_input: bool,
     /// Absolute URL the form submits to.
     pub form_action: Option<String>,
@@ -47,8 +54,8 @@ impl SensitivityFacts {
     fn ambiguous() -> Self {
         Self {
             target_in_form: true,
-            form_has_password: true,
-            form_has_payment: true,
+            region_has_password: true,
+            region_has_payment: true,
             is_submitter: true,
             ..Self::default()
         }
@@ -58,10 +65,13 @@ impl SensitivityFacts {
 /// The agent action being classified.
 #[derive(Debug, Clone, Copy)]
 pub enum Gesture<'a> {
+    /// A pointer click: `click`, `check` and `uncheck`.
     Click,
     Key(&'a str),
     Type(&'a str),
     Fill,
+    /// `select_option`: a change a page can act on like a click.
+    Select,
     Navigate(&'a Url),
     Upload,
 }
@@ -98,6 +108,12 @@ fn origin_of(url: &str) -> Option<CanonicalOrigin> {
 
 fn is_enter(key: &str) -> bool {
     ["enter", "numpadenter", "return", "\n", "\r"]
+        .iter()
+        .any(|k| key.eq_ignore_ascii_case(k))
+}
+
+fn is_space(key: &str) -> bool {
+    ["space", "spacebar", " "]
         .iter()
         .any(|k| key.eq_ignore_ascii_case(k))
 }
@@ -150,6 +166,31 @@ impl Classes {
     }
 }
 
+/// Whether `gesture` can set off what its target does: a click on
+/// anything but a text field, Enter, Space on anything but a text field,
+/// a change of a control's state. A region holding credentials then
+/// counts it as their submit, however the page wired it up.
+fn activates(gesture: Gesture<'_>, facts: &SensitivityFacts) -> bool {
+    match gesture {
+        Gesture::Click | Gesture::Fill => !facts.is_text_entry,
+        Gesture::Select => true,
+        Gesture::Key(key) => is_enter(key) || (is_space(key) && !facts.is_text_entry),
+        Gesture::Type(text) => has_newline(text) || !facts.is_text_entry,
+        Gesture::Navigate(_) | Gesture::Upload => false,
+    }
+}
+
+/// Whether `gesture` submits the target's form natively: Enter or a
+/// typed newline in it, or activating its submitter.
+fn submits_form(gesture: Gesture<'_>, facts: &SensitivityFacts) -> bool {
+    let implicit = match gesture {
+        Gesture::Key(key) => is_enter(key),
+        Gesture::Type(text) => has_newline(text),
+        _ => false,
+    };
+    facts.target_in_form && (implicit || (facts.is_submitter && activates(gesture, facts)))
+}
+
 /// Every sensitive class `gesture` falls in.
 pub fn classify(
     gesture: Gesture<'_>,
@@ -165,26 +206,22 @@ pub fn classify(
     let page = scene.tab_url;
     let mut out = Classes(Vec::new());
 
-    let submits = match gesture {
-        Gesture::Click => facts.is_submitter && facts.target_in_form,
-        Gesture::Key(key) => is_enter(key) && facts.target_in_form,
-        Gesture::Type(text) => has_newline(text) && facts.target_in_form,
-        Gesture::Fill | Gesture::Navigate(_) | Gesture::Upload => false,
-    };
-    if submits {
-        if facts.form_has_password {
-            out.add(
-                ActionClass::PasswordSubmit,
-                page_origin.clone(),
-                page,
-                false,
-            );
+    if activates(gesture, facts) {
+        if facts.region_has_password {
+            out.add(ActionClass::PasswordSubmit, page_origin.clone(), page, false);
         }
-        if facts.form_has_payment {
+        if facts.region_has_payment {
             out.add(ActionClass::PaymentSubmit, page_origin.clone(), page, false);
         }
+        if let Some(link) = facts.link_target.as_deref() {
+            if scene.tainted && carries_data(link) && leaves(Some(link), tab_origin.as_ref()) {
+                out.add(ActionClass::TaintedExfil, origin_of(link), link, false);
+            }
+        }
+    }
+    if submits_form(gesture, facts) && scene.tainted {
         let action = facts.form_action.as_deref();
-        if scene.tainted && leaves(action, tab_origin.as_ref()) {
+        if leaves(action, tab_origin.as_ref()) {
             let target = action.unwrap_or(page);
             let origin = action.and_then(origin_of).or_else(|| page_origin.clone());
             out.add(ActionClass::TaintedExfil, origin, target, false);
@@ -192,13 +229,6 @@ pub fn classify(
     }
 
     match gesture {
-        Gesture::Click => {
-            if let Some(link) = facts.link_target.as_deref() {
-                if scene.tainted && carries_data(link) && leaves(Some(link), tab_origin.as_ref()) {
-                    out.add(ActionClass::TaintedExfil, origin_of(link), link, false);
-                }
-            }
-        }
         Gesture::Navigate(url) => {
             let url = url.as_str();
             if scene.tainted && carries_data(url) && leaves(Some(url), tab_origin.as_ref()) {
@@ -206,7 +236,7 @@ pub fn classify(
             }
         }
         Gesture::Upload => out.add(ActionClass::Upload, page_origin.clone(), page, false),
-        Gesture::Key(_) | Gesture::Type(_) | Gesture::Fill => {}
+        _ => {}
     }
 
     // Facts the page can forge cannot clear a submit-shaped action on an
@@ -214,8 +244,8 @@ pub fn classify(
     // submit that always prompts.
     if !scene.facts_trusted && !scene.trusted_origin {
         let submit_shaped = match gesture {
-            Gesture::Click => facts.is_submitter || facts.target_in_form,
-            Gesture::Key(key) => is_enter(key),
+            Gesture::Click | Gesture::Select => facts.is_submitter || facts.target_in_form,
+            Gesture::Key(key) => is_enter(key) || is_space(key),
             Gesture::Type(text) => has_newline(text) || facts.target_in_form,
             Gesture::Fill => facts.target_in_form,
             Gesture::Navigate(_) | Gesture::Upload => false,

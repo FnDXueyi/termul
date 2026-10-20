@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use termul_manager_lib::conformance_support::{ActionClass, AppPreapproval, CanonicalOrigin};
+use termul_manager_lib::conformance_support::ActionClass;
 
 use crate::adapter::{Scope, LINKED_FILE, SECRET_FILE, SWAPPED_FILE, UPLOAD_BODY, UPLOAD_FILE};
 use crate::cases::{mismatch, CaseResult, Ctx, Failure};
@@ -88,44 +88,35 @@ async fn click_sign_in(c: &Ctx<'_>) -> Result<serde_json::Value, Failure> {
     c.call("click", json!({ "ref": submit })).await
 }
 
+/// Signing in is the agent's to do by default, on either profile.
 pub async fn password_submit(c: &Ctx<'_>) -> CaseResult {
     open_on(c, "ephemeral", "/password.html", PASSWORD_READY).await?;
-    expect_refusal(
-        click_sign_in(c).await,
-        "confirmation_required",
-        "unattended",
-        "password submit",
-    )?;
-    expect_tickets(c, &[ActionClass::PasswordSubmit], "password submit")?;
-    c.expect_url("/password.html", "the refused submit").await?;
-
-    preapprove(c, Scope::Project, ActionClass::PasswordSubmit).await?;
     click_sign_in(c).await?;
     c.call("wait", json!({ "text": "Form done" })).await?;
-    expect_tickets(
-        c,
-        &[ActionClass::PasswordSubmit],
-        "pre-approved password submit",
-    )
+    expect_tickets(c, &[], "password submit")
 }
 
 pub async fn password_submit_global(c: &Ctx<'_>) -> CaseResult {
+    open_on(c, "global", "/password.html", PASSWORD_READY).await?;
+    click_sign_in(c).await?;
+    c.call("wait", json!({ "text": "Form done" })).await?;
+    expect_tickets(c, &[], "global password submit")
+}
+
+/// With the app asking before password submits, one prompts, and a
+/// project pre-approval covers it on an ephemeral tab only.
+pub async fn password_submit_asked(c: &Ctx<'_>) -> CaseResult {
+    let _asking = c.engine.ask_before_passwords();
     open_on(c, "global", "/password.html", PASSWORD_READY).await?;
     preapprove(c, Scope::Project, ActionClass::PasswordSubmit).await?;
     expect_refusal(
         click_sign_in(c).await,
         "confirmation_required",
         "unattended",
-        "pre-approved password submit on the global profile",
+        "asked password submit on the global profile",
     )?;
-    expect_tickets(c, &[ActionClass::PasswordSubmit], "global password submit")?;
-    let parsed = CanonicalOrigin::parse(&origin(c)).map_err(|e| mismatch(format!("{e:?}")))?;
-    if AppPreapproval::new(ActionClass::PasswordSubmit, parsed).is_ok() {
-        return Err(mismatch(
-            "a password submit could be pre-approved for every project",
-        ));
-    }
-    Ok(())
+    expect_tickets(c, &[ActionClass::PasswordSubmit], "asked password submit")?;
+    c.expect_url("/password.html", "the refused submit").await
 }
 
 pub async fn tainted_navigation(c: &Ctx<'_>) -> CaseResult {
@@ -221,6 +212,7 @@ pub async fn upload_refusals(c: &Ctx<'_>) -> CaseResult {
 /// password form, so it is classified from that button, not the shadow
 /// host the document reports as focused.
 pub async fn focused_password_submit(c: &Ctx<'_>) -> CaseResult {
+    let _asking = c.engine.ask_before_passwords();
     c.open("/password-shadow.html", SHADOW_PASSWORD_READY).await?;
     expect_refusal(
         c.call("press", json!({ "key": "Enter" })).await,
@@ -230,6 +222,54 @@ pub async fn focused_password_submit(c: &Ctx<'_>) -> CaseResult {
     )?;
     expect_tickets(c, &[ActionClass::PasswordSubmit], "focused password submit")?;
     c.expect_url("/password-shadow.html", "the refused submit").await
+}
+
+/// `check` on a submit styled as a switch clicks it, so it submits the
+/// password form like any click. The form also holds a field named
+/// `elements`, which shadows `form.elements` for every script.
+pub async fn check_password_submit(c: &Ctx<'_>) -> CaseResult {
+    let _asking = c.engine.ask_before_passwords();
+    c.open("/password-switch.html", "Password switch fixture").await?;
+    let switch = c.ref_of("switch", "Remember me and sign in").await?;
+    expect_refusal(
+        c.call("check", json!({ "ref": switch })).await,
+        "confirmation_required",
+        "unattended",
+        "check on a switch-styled password submit",
+    )?;
+    expect_tickets(c, &[ActionClass::PasswordSubmit], "check password submit")?;
+    c.expect_url("/password-switch.html", "the refused submit").await
+}
+
+/// A login without a form, submitted by its page script, is a password
+/// submit all the same.
+pub async fn formless_password_submit(c: &Ctx<'_>) -> CaseResult {
+    let _asking = c.engine.ask_before_passwords();
+    c.open("/login-formless.html", "Formless login fixture").await?;
+    let sign_in = c.ref_of("button", "Sign in").await?;
+    expect_refusal(
+        c.call("click", json!({ "ref": sign_in })).await,
+        "confirmation_required",
+        "unattended",
+        "formless login",
+    )?;
+    expect_tickets(c, &[ActionClass::PasswordSubmit], "formless password submit")?;
+    c.expect_url("/login-formless.html", "the refused submit").await
+}
+
+/// Once the agent read the page, Enter on a link that carries data to
+/// another origin is confirmed like a click on it.
+pub async fn tainted_link_enter(c: &Ctx<'_>) -> CaseResult {
+    c.open("/link-away.html", "Link away fixture").await?;
+    let link = c.ref_of("link", "Send the data").await?;
+    expect_refusal(
+        c.call("press", json!({ "ref": link, "key": "Enter" })).await,
+        "confirmation_required",
+        "unattended",
+        "Enter on a data-carrying link after a snapshot",
+    )?;
+    expect_tickets(c, &[ActionClass::TaintedExfil], "tainted link Enter")?;
+    c.expect_url("/link-away.html", "the refused link").await
 }
 
 /// A chooser the page opens on an agent tab never shows the native

@@ -112,6 +112,7 @@ pub async fn iframe_cross_origin(c: &Ctx<'_>) -> CaseResult {
 /// A password submit inside a cross-origin frame is classified from the
 /// frame's own form.
 pub async fn frame_password_submit(c: &Ctx<'_>) -> CaseResult {
+    let _asking = c.engine.ask_before_passwords();
     let outline = cross_frame(c, "password.html", "Sign in").await?;
     let submit = ref_in(&outline, "button", "Sign in")?;
     expect_refusal(
@@ -127,6 +128,7 @@ pub async fn frame_password_submit(c: &Ctx<'_>) -> CaseResult {
 /// cross-origin frame the page's own helpers cannot read: it is
 /// confirmed as a credential submit.
 pub async fn frame_focused_password_submit(c: &Ctx<'_>) -> CaseResult {
+    let _asking = c.engine.ask_before_passwords();
     let outline = cross_frame(c, "password.html", "Sign in").await?;
     let user = ref_in(&outline, "textbox", "User")?;
     c.call("fill", json!({ "ref": user, "value": "ada" })).await?;

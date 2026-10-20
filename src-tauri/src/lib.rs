@@ -182,11 +182,11 @@ pub use acp::claude_admin;
 #[doc(hidden)]
 pub mod conformance_support {
     pub use crate::acp::browser_policy::{
-        ActionClass, AppPolicyOp, AppPreapproval, BrowserPolicyService, CanonicalOrigin,
-        ProjectPolicyOp, ProjectPreapproval, UnwiredProfileControl,
+        ActionClass, AppPolicy, AppPolicyOp, AppPreapproval, BrowserPolicyService, CanonicalOrigin,
+        PolicyRefusal, ProjectPolicy, ProjectPolicyOp, ProjectPreapproval, UnwiredProfileControl,
     };
     pub use crate::browser_automation::core::ports::{
-        ConsentOption, PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
+        ConsentOption, PermissionRequest, PolicyStore, PortFuture, TicketOutcome, TicketRequest,
     };
     pub use crate::browser_automation::engine::{
         desktop_engine, BrowserEngine, CapabilityId, EngineError, EngineErrorKind, InputMode, Key, KeyInput,
