@@ -6,23 +6,17 @@
 //! explicitly AHEAD of the static fallback so it is not shadowed by the static
 //! mount (AC1).
 
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, Request, State},
-    http::StatusCode,
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
+    middleware,
     routing::{get, post, put},
-    Json, Router,
+    Router,
 };
-use serde::{Deserialize, Serialize};
 
-use crate::canvas::bundle_path::{is_bundle_path, redact_canvas_path};
 use crate::web::acp_api;
-use crate::web::auth::{BearerVerified, WebAuth};
+use crate::web::auth::WebAuth;
 
 use crate::acp::{AcpCatalogService, AcpInstallService, AcpManager};
 
@@ -57,6 +51,12 @@ use crate::web::worktree_rename_api;
 use crate::web::ws::{ws_upgrade, AppState, HistoryMode};
 
 use super::assets;
+
+mod gate;
+mod host_routes;
+
+use gate::maybe_gate_api;
+use host_routes::{agent_idle_window, health_check, set_agent_idle_window};
 
 /// The desktop host pieces a local (in-process) relay connection needs: what
 /// `lib.rs` already built for the Tauri app, shared with every carrier.
@@ -426,117 +426,6 @@ pub fn router(
     .with_state(state)
 }
 
-/// Apply the web auth middleware to the router when the gate is active.
-/// Public paths (`/health`, `/ws`, `/terminal/ws`, `/oauth/callback`, and all
-/// non-API static/SPA paths) always pass — see [`web_auth_gate`]. Generic over
-/// the router's (still-missing) state type so both `router` and
-/// `router_with_static` can call it before `with_state`.
-fn maybe_gate_api<S>(web_auth: Option<Arc<WebAuth>>, r: Router<S>) -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    match web_auth {
-        Some(auth) => r.layer(middleware::from_fn_with_state(auth, web_auth_gate)),
-        None => r,
-    }
-}
-
-/// Exact paths that never require the token: the liveness probe, both WS
-/// endpoints (they gate in-protocol, after the upgrade), and the OAuth
-/// redirect target (the authorization server cannot carry the token).
-const PUBLIC_PATHS: &[&str] = &["/health", "/ws", "/terminal/ws", "/oauth/callback"];
-
-/// API route prefixes that require the token when the gate is active
-/// (CAP-1 intent: "every endpoint"). Everything else — the static bundle and
-/// SPA client routes — stays public so the login page can load.
-const GATED_PREFIXES: &[&str] = &[
-    "/host/",
-    "/projects",
-    "/project/",
-    "/mcp-servers",
-    "/fs/",
-    "/git/",
-    "/search/",
-    "/skills",
-    "/log/",
-    "/shells",
-    "/acp/",
-    "/worktree/",
-    // The /canvas/ API routes require the token. The /canvas/<id>/* bundle
-    // paths are exempt — see [`is_bundle_path`] (canvas-token authed
-    // in the sub-router).
-    "/canvas/",
-];
-
-
-/// Whether `path` is a gated API route. Pure decision fn (unit-testable).
-fn requires_token(path: &str) -> bool {
-    if PUBLIC_PATHS.contains(&path) {
-        return false;
-    }
-    // Canvas bundle paths carry their own canvas token in the path; the
-    // outer bearer gate skips them.
-    if is_bundle_path(path) {
-        return false;
-    }
-    GATED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
-}
-
-/// Extract the presented token from the `Authorization: Bearer <token>`
-/// header (scheme match is case-insensitive, RFC 7235). There is
-/// deliberately NO `?token=` query-param fallback on gated API routes:
-/// query strings end up in access logs, proxy logs, and `Referer` headers,
-/// which is exactly where a bearer credential must not live. The bootstrap
-/// URL carries the token in the URL FRAGMENT (`#token=`) instead —
-/// fragments are never sent to the server — and the browser client moves it
-/// to localStorage + the `Authorization` header on first load
-/// (`src/renderer/lib/web-auth-token.ts`).
-fn presented_token(request: &Request) -> Option<String> {
-    let value = request.headers().get(axum::http::header::AUTHORIZATION)?;
-    let value = value.to_str().ok()?;
-    let bytes = value.as_bytes();
-    if bytes.len() > 7 && value[..6].eq_ignore_ascii_case("bearer") && bytes[6] == b' ' {
-        return Some(value[7..].to_string());
-    }
-    None
-}
-
-/// Axum middleware enforcing the web auth gate on gated API routes. The 401
-/// body mirrors the `IpcBody` failure shape (`{success, error, code}`) the
-/// renderer's REST helpers parse; the token is never logged or echoed.
-async fn web_auth_gate(
-    State(auth): State<Arc<WebAuth>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    if !requires_token(request.uri().path()) {
-        return next.run(request).await;
-    }
-    let presented = presented_token(&request);
-    match presented {
-        Some(token) if auth.accepts(&token) => {
-            request.extensions_mut().insert(BearerVerified);
-            next.run(request).await
-        }
-        _ => {
-            tracing::warn!(
-                target: "termul::web::router",
-                path = %redact_canvas_path(request.uri().path()),
-                "web auth gate refused API request"
-            );
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "Unauthorized",
-                    "code": "UNAUTHORIZED",
-                })),
-            )
-                .into_response()
-        }
-    }
-}
-
 /// Same as [`router`], but with an injectable static-root for unit tests.
 #[allow(clippy::too_many_arguments)]
 pub fn router_with_static(
@@ -702,146 +591,6 @@ pub fn router_with_static(
             connections: ConnectionRuntime::default(),
         }
     })
-}
-
-/// Liveness + capability probe for the ACP web server. Returns JSON so the
-/// web client can discover the server's write-admission policy
-/// (`allowRemoteWrites`) instead of guessing from `window.location.hostname`
-/// (wrong for Cloudflare tunnel domains). The admission bool mirrors the
-/// EXACT per-request `check_local_only` admission for the requesting peer:
-/// `!shared_live_writes_denied && (peer.is_loopback() || allow_remote_writes)`.
-/// A loopback peer (e.g. a `localhost` browser on the standalone server, no
-/// opt-in) is admitted regardless of `allow_remote_writes`, so `/health`
-/// reports `true` for it — matching what its `/worktree/*` writes would face.
-/// Desktop shared-live sets `shared_live_writes_denied`, so it reports `false`
-/// for every peer (writes are genuinely denied there).
-async fn health_check(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    // The same predicate `/ws`, `/terminal/ws` and the write routes use.
-    let allow = crate::web::capabilities::write_decision(
-        peer,
-        crate::web::capabilities::WriteFlags::from_state(&state),
-    )
-    .is_allowed();
-    // Durable boundary log (AGENTS.md): record the capability-admission
-    // decision. No peer address or credentials logged — only the decision
-    // + whether the deployment-mode deny or opt-in governed it.
-    tracing::debug!(
-        target: "termul::web::router",
-        allow_remote_writes = allow,
-        shared_live_denied = state.shared_live_writes_denied,
-        opt_in = state.allow_remote_writes,
-        "health capability probe",
-    );
-    (
-        StatusCode::OK,
-        Json(HealthBody {
-            status: "ok",
-            allow_remote_writes: allow,
-            case_insensitive_paths: PATHS_CASE_INSENSITIVE_BY_TARGET,
-        }),
-    )
-}
-
-/// The source of truth for the web client's path case rule (#641). A per-volume
-/// probe would need a path, and `/health` is host-wide.
-const PATHS_CASE_INSENSITIVE_BY_TARGET: bool = cfg!(any(windows, target_os = "macos"));
-
-/// `GET /health` response body.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HealthBody {
-    status: &'static str,
-    allow_remote_writes: bool,
-    case_insensitive_paths: bool,
-}
-
-/// `GET /host/agent-idle-window` — the live idle-chat window. Same `IpcResult`
-/// envelope as the other host reads so the web client can parse it with
-/// `getJson`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentIdleWindowBody {
-    success: bool,
-    data: crate::web::agent_reaper::AgentIdleWindowStatus,
-}
-
-async fn agent_idle_window() -> impl IntoResponse {
-    let data = crate::web::agent_reaper::resolved_agent_idle_window();
-    tracing::debug!(
-        target: "termul::web::agent_reaper",
-        secs = data.secs,
-        source = data.source,
-        "agent idle window probe"
-    );
-    (StatusCode::OK, Json(idle_window_ok(data)))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetAgentIdleWindowRequest {
-    secs: Option<u64>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentIdleWindowError {
-    success: bool,
-    error: String,
-    code: String,
-}
-
-fn idle_window_ok(data: crate::web::agent_reaper::AgentIdleWindowStatus) -> AgentIdleWindowBody {
-    AgentIdleWindowBody {
-        success: true,
-        data,
-    }
-}
-
-/// `POST /host/agent-idle-window` — save the Settings choice. A flag or
-/// `$TERMUL_AGENT_IDLE_REAP_SECS` keeps the live window. View-only peers
-/// (shared-live, or a remote peer without `--allow-remote-writes`) are refused.
-async fn set_agent_idle_window(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(body): Json<SetAgentIdleWindowRequest>,
-) -> Response {
-    let allowed = crate::web::capabilities::write_decision(
-        peer,
-        crate::web::capabilities::WriteFlags::from_state(&state),
-    )
-    .is_allowed();
-    if !allowed {
-        tracing::info!(
-            target: "termul::web::agent_reaper",
-            "agent idle window change refused for a view-only peer"
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            Json(AgentIdleWindowError {
-                success: false,
-                error: "this connection cannot change host settings".to_string(),
-                code: "FORBIDDEN".to_string(),
-            }),
-        )
-            .into_response();
-    }
-    if matches!(body.secs, Some(0)) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(AgentIdleWindowError {
-                success: false,
-                error: "agent idle window must be greater than 0 seconds".to_string(),
-                code: "INVALID_IDLE_WINDOW".to_string(),
-            }),
-        )
-            .into_response();
-    }
-    crate::web::agent_reaper::set_agent_idle_window_override(body.secs);
-    let data = crate::web::agent_reaper::resolved_agent_idle_window();
-    (StatusCode::OK, Json(idle_window_ok(data))).into_response()
 }
 
 #[cfg(test)]

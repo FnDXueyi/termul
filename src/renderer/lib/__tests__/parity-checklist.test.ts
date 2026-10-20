@@ -407,7 +407,7 @@ describe('Parity Checklist Automation', () => {
     it('registers both host surfaces through the shared Rust service', () => {
       const root = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
       const tauri = readFileSync(join(root, 'lib.rs'), 'utf-8')
-      const router = readFileSync(join(root, 'web', 'router.rs'), 'utf-8')
+      const router = readFileSync(join(root, 'web', 'router', 'mod.rs'), 'utf-8')
       expect(tauri).toMatch(/acp_factory_key_status/)
       expect(tauri).toMatch(/acp_factory_key_save/)
       expect(router).toMatch(/\/acp\/factory-key/)
@@ -1013,7 +1013,7 @@ describe('Parity Checklist Automation', () => {
     const Facade = join(LIB_DIR, 'worktree-api.ts')
     const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
     const WebRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web')
-    const RouterRust = join(WebRust, 'router.rs')
+    const RouterRust = join(WebRust, 'router', 'mod.rs')
     const WorktreeApiRust = join(WebRust, 'worktree_api.rs')
     const WorktreeSymlinksRust = join(WebRust, 'worktree_api', 'symlinks.rs')
     const CommandsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'commands')
@@ -1169,7 +1169,7 @@ describe('Parity Checklist Automation', () => {
     const SrcTauri = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
     const Facade = join(LIB_DIR, 'git-api.ts')
     const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
-    const RouterRust = join(SrcTauri, 'web', 'router.rs')
+    const RouterRust = join(SrcTauri, 'web', 'router', 'mod.rs')
     const HunkApiRust = join(SrcTauri, 'web', 'git_hunk_api.rs')
     const CommandsGitRust = join(SrcTauri, 'commands', 'git.rs')
     const LibRust = join(SrcTauri, 'lib.rs')
@@ -1235,7 +1235,7 @@ describe('Parity Checklist Automation', () => {
     const FsFacade = join(LIB_DIR, 'tauri-filesystem-api.ts')
     const WebFileNameSearch = join(LIB_DIR, 'web-filename-search.ts')
     const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
-    const RouterRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web', 'router.rs')
+    const RouterRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web', 'router', 'mod.rs')
     const SearchApiRust = join(
       LIB_DIR,
       '..',
@@ -1536,7 +1536,7 @@ describe('Parity Checklist Automation', () => {
         join(RustRoot, 'web', 'canvas_persistence_api.rs'),
         'utf-8'
       )
-      const router = readFileSync(join(RustRoot, 'web', 'router.rs'), 'utf-8')
+      const router = readFileSync(join(RustRoot, 'web', 'router', 'mod.rs'), 'utf-8')
       const bundlePath = readFileSync(join(RustRoot, 'canvas', 'bundle_path.rs'), 'utf-8')
       expect(router, 'the bearer gate exempts only bundle paths').toContain('is_bundle_path')
       const lib = readFileSync(join(RustRoot, 'lib.rs'), 'utf-8')
@@ -1726,7 +1726,7 @@ describe('Git diff stat parity (shell revamp story 8)', () => {
   const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
   const GitApiFacade = join(LIB_DIR, 'git-api.ts')
   const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
-  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouterRust = join(SRC_TAURI, 'web', 'router', 'mod.rs')
   const RouteRust = join(SRC_TAURI, 'web', 'git_diff_stat_api.rs')
   const ServiceRust = join(SRC_TAURI, 'trackers', 'git_tracker', 'diff_stat.rs')
   const CommandsGitRust = join(SRC_TAURI, 'commands', 'git.rs')
@@ -1781,7 +1781,7 @@ describe('Worktree branch rename parity (shell revamp story 16)', () => {
   const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
   const WorktreeFacade = join(LIB_DIR, 'worktree-api.ts')
   const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
-  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouterRust = join(SRC_TAURI, 'web', 'router', 'mod.rs')
   const RouteRust = join(SRC_TAURI, 'web', 'worktree_rename_api.rs')
   const ManagerRust = join(SRC_TAURI, 'acp', 'manager', 'worktree_branch.rs')
   const CommandsWorktreeRust = join(SRC_TAURI, 'commands', 'worktree.rs')
@@ -2079,7 +2079,7 @@ describe('Git History commit detail parity', () => {
   const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
   const GitApiFacade = join(LIB_DIR, 'git-api.ts')
   const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
-  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouterRust = join(SRC_TAURI, 'web', 'router', 'mod.rs')
   const RouteRust = join(SRC_TAURI, 'web', 'git_history_api.rs')
   const ServiceRust = join(SRC_TAURI, 'trackers', 'git_tracker', 'commit_detail.rs')
   const CommandsGitRust = join(SRC_TAURI, 'commands', 'git.rs')
@@ -2149,7 +2149,7 @@ describe('Git History commit detail parity', () => {
 describe('Browser policy parity', () => {
   const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
   const Facade = join(LIB_DIR, 'browser-policy-api.ts')
-  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouterRust = join(SRC_TAURI, 'web', 'router', 'mod.rs')
   const RouteRust = join(SRC_TAURI, 'web', 'browser_policy_api.rs')
   const CommandsRust = join(SRC_TAURI, 'commands', 'browser_policy.rs')
   const LibRust = join(SRC_TAURI, 'lib.rs')
@@ -2214,8 +2214,8 @@ describe('Browser policy parity', () => {
   })
 
   it('every policy route sits under a bearer-gated prefix', () => {
-    const router = readFileSync(RouterRust, 'utf-8')
-    expect(router).toMatch(/const GATED_PREFIXES[^;]*"\/host\/"/s)
+    const gate = readFileSync(join(SRC_TAURI, 'web', 'router', 'gate.rs'), 'utf-8')
+    expect(gate).toMatch(/const GATED_PREFIXES[^;]*"\/host\/"/s)
     for (const route of new Set(OPERATIONS.map((op) => op.route))) {
       expect(route.startsWith('/host/')).toBe(true)
     }
