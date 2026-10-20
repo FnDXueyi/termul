@@ -4,9 +4,13 @@
 //! engine raises. A grant that is already saved in the webview profile can answer a
 //! page without raising one, so a browser tab clears them before it loads a page.
 //!
-//! WebView2 persists per-origin permission state in the profile, and every webview of
-//! the app shares that profile, so [`clear_saved_grants`] resets each non-default entry
-//! back to `Default` through `ICoreWebView2Profile4`. WKWebView asks its delegate for
+//! WebView2 persists per-origin permission state in the profile, and every user tab
+//! shares that profile with the app's own UI, so [`clear_saved_grants`] resets each
+//! non-default entry of a site back to `Default` through `ICoreWebView2Profile4`. Entries
+//! of the app's own origin are left alone: only the main webview loads it, and the deny
+//! handler does not govern it. Every tab carries the deny handler, so once a clear has
+//! finished no tab can save a new grant; [`ClearOnce`] therefore clears once per process,
+//! and a clear that fails never keeps the user's tab from opening. WKWebView asks its delegate for
 //! camera and microphone access on every request and keeps no per-site state of its
 //! own, and WebKitGTK has no persistent permission store, so there is nothing to clear
 //! on macOS and Linux.
@@ -16,6 +20,55 @@
 pub(crate) struct ClearReport {
     pub reset: usize,
     pub failed: usize,
+}
+
+/// Why a clear did not finish: the runtime lacks the profile API, or a call failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the WebView2 clear can fail"))]
+pub(crate) enum ClearError {
+    Unsupported,
+    Failed,
+}
+
+/// Whether a saved entry's origin is the app UI's own origin.
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the WebView2 clear filters entries"))]
+pub(crate) fn is_app_origin(saved: &str, app_origin: &str) -> bool {
+    saved
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(app_origin.trim_end_matches('/'))
+}
+
+/// Runs the profile clear until one settles it: a finished clear, or a runtime
+/// that cannot clear at all. A failed clear stays unsettled, so the next tab
+/// tries again.
+#[derive(Default)]
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "only WebView2 user tabs share a profile with saved grants")
+)]
+pub(crate) struct ClearOnce {
+    settled: tokio::sync::Mutex<bool>,
+}
+
+#[cfg_attr(
+    not(windows),
+    allow(dead_code, reason = "only WebView2 user tabs share a profile with saved grants")
+)]
+impl ClearOnce {
+    /// `None` once an earlier clear settled; otherwise this attempt's result.
+    pub async fn run<F, Fut>(&self, clear: F) -> Option<Result<ClearReport, ClearError>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<ClearReport, ClearError>>,
+    {
+        let mut settled = self.settled.lock().await;
+        if *settled {
+            return None;
+        }
+        let result = clear().await;
+        *settled = !matches!(result, Err(ClearError::Failed));
+        Some(result)
+    }
 }
 
 /// Counts the asynchronous resets a clear issued and yields the report when the
@@ -65,22 +118,17 @@ mod windows_impl {
     };
     use windows_core::{Interface, HSTRING, PWSTR};
 
-    use super::{ClearReport, ResetTally};
+    use super::{is_app_origin, ClearError, ClearReport, ResetTally};
 
     const CLEAR_TIMEOUT: Duration = Duration::from_secs(3);
 
     type Reply = Rc<RefCell<Option<oneshot::Sender<Result<ClearReport, ()>>>>>;
 
-    /// Why a clear did not finish: the runtime lacks the profile API, or a call failed.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum ClearError {
-        Unsupported,
-        Failed,
-    }
-
-    /// Reset every saved permission entry of the profile `webview` runs in.
+    /// Reset every saved permission entry of the profile `webview` runs in,
+    /// except those of `app_origin`.
     pub(crate) async fn clear_saved_grants(
         webview: &tauri::Webview,
+        app_origin: String,
     ) -> Result<ClearReport, ClearError> {
         let (tx, rx) = oneshot::channel::<Result<ClearReport, ()>>();
         let (support_tx, support_rx) = oneshot::channel::<bool>();
@@ -99,7 +147,7 @@ mod windows_impl {
                 };
                 let _ = support_tx.send(true);
                 let reply: Reply = Rc::new(RefCell::new(Some(tx)));
-                issue(&profile, reply);
+                issue(&profile, app_origin, reply);
             })
             .map_err(|_| ClearError::Failed)?;
         if !support_rx.await.map_err(|_| ClearError::Failed)? {
@@ -117,13 +165,13 @@ mod windows_impl {
         }
     }
 
-    fn issue(profile: &ICoreWebView2Profile4, reply: Reply) {
+    fn issue(profile: &ICoreWebView2Profile4, app_origin: String, reply: Reply) {
         let list_profile = profile.clone();
         let list_reply = reply.clone();
         let handler = GetNonDefaultPermissionSettingsCompletedHandler::create(Box::new(
             move |hr, collection| {
                 let entries = match (hr, collection) {
-                    (Ok(()), Some(collection)) => saved_entries(&collection),
+                    (Ok(()), Some(collection)) => saved_entries(&collection, &app_origin),
                     _ => Err(()),
                 };
                 match entries {
@@ -141,6 +189,7 @@ mod windows_impl {
 
     fn saved_entries(
         collection: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2PermissionSettingCollectionView,
+        app_origin: &str,
     ) -> Result<Vec<(COREWEBVIEW2_PERMISSION_KIND, String)>, ()> {
         let mut count = 0u32;
         // SAFETY: the collection is valid for the duration of the callback.
@@ -150,7 +199,7 @@ mod windows_impl {
             let setting =
                 unsafe { collection.GetValueAtIndex(index) }.map_err(|_| ())?;
             let (kind, origin, state) = read_setting(&setting)?;
-            if state != COREWEBVIEW2_PERMISSION_STATE_DEFAULT {
+            if state != COREWEBVIEW2_PERMISSION_STATE_DEFAULT && !is_app_origin(&origin, app_origin) {
                 entries.push((kind, origin));
             }
         }
@@ -211,7 +260,7 @@ mod windows_impl {
 }
 
 #[cfg(windows)]
-pub(crate) use windows_impl::{clear_saved_grants, ClearError};
+pub(crate) use windows_impl::clear_saved_grants;
 
 #[cfg(test)]
 #[path = "browser_tab_saved_grants_tests.rs"]
