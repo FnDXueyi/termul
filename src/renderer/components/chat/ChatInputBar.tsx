@@ -52,6 +52,7 @@ import { McpBadge } from './McpBadge'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PromptQueuePanel } from './PromptQueuePanel'
 import { SlashCommandMenu, type SlashMenuHandle } from './SlashCommandMenu'
+import { SkillFilesProvider } from './skill-file-links'
 import { useChatComposer } from './use-chat-composer'
 import { useComposerAttachments } from './use-composer-attachments'
 import { useComposerCaretRestore, useComposerMentionSelect } from './use-composer-caret-restore'
@@ -678,27 +679,29 @@ export function ChatInputBar({
                   scroll-sync. The `value` string (sentinel-token format) is
                   the shared model the wire builder + draft persistence +
                   timeline consume (byte-identical wire payload). */}
-              <ChatComposerEditor
-                className="min-w-0 flex-1"
-                value={value}
-                onValueChange={handleValueChange}
-                onCaretChange={mentions.update}
-                onBeforeEditorKeyDown={handleKeyDown}
-                onPasteAttachments={handleComposerPaste}
-                getSkillPaths={() => skillPathsRef.current}
-                editorRef={editorRef}
-                inputRef={composerInputRef}
-                disabled={disabled || sending}
-                minHeight={26} /* 1 line: 16px × 1.625 */
-                maxHeight={78} /* 3 lines: 3 × 26px, then scroll */
-                placeholder={
-                  disabled
-                    ? 'Composer unavailable'
-                    : hasCommandToken
-                      ? 'Add a message (optional)…'
-                      : 'Ask anything… (/ for commands, @ for files)'
-                }
-              />
+              <SkillFilesProvider projectRoot={projectRoot ?? session.cwd}>
+                <ChatComposerEditor
+                  className="min-w-0 flex-1"
+                  value={value}
+                  onValueChange={handleValueChange}
+                  onCaretChange={mentions.update}
+                  onBeforeEditorKeyDown={handleKeyDown}
+                  onPasteAttachments={handleComposerPaste}
+                  getSkillPaths={() => skillPathsRef.current}
+                  editorRef={editorRef}
+                  inputRef={composerInputRef}
+                  disabled={disabled || sending}
+                  minHeight={26} /* 1 line: 16px × 1.625 */
+                  maxHeight={78} /* 3 lines: 3 × 26px, then scroll */
+                  placeholder={
+                    disabled
+                      ? 'Composer unavailable'
+                      : hasCommandToken
+                        ? 'Add a message (optional)…'
+                        : 'Ask anything… (/ for commands, @ for files)'
+                  }
+                />
+              </SkillFilesProvider>
               {/* Context usage ring: top right, centered on the first line.
                   The mobile row carries the ring in its toolbar instead. */}
               {!isMobileShell && (
