@@ -58,9 +58,13 @@ fn indexes_harness_roots_outside_the_project() {
     );
     let claude = write_skill(&home.join(".claude/skills"), "cl-skill", None);
 
-    let entries =
-        list_skill_files_with_roots(Some(&home), Some(&config), Some(&project.to_string_lossy()))
-            .unwrap();
+    let entries = list_skill_files_with_roots(
+        &[],
+        Some(&home),
+        Some(&config),
+        Some(&project.to_string_lossy()),
+    )
+    .unwrap();
 
     assert_eq!(
         path_of(&entries, "termul-skill"),
@@ -87,7 +91,8 @@ fn project_skill_overrides_global_skill_case_insensitively() {
     let project_skill = write_skill(&project.join(".claude/skills"), "review", Some("Review"));
 
     let entries =
-        list_skill_files_with_roots(Some(&home), None, Some(&project.to_string_lossy())).unwrap();
+        list_skill_files_with_roots(&[], Some(&home), None, Some(&project.to_string_lossy()))
+            .unwrap();
 
     let matches: Vec<_> = entries
         .iter()
@@ -95,6 +100,46 @@ fn project_skill_overrides_global_skill_case_insensitively() {
         .collect();
     assert_eq!(matches.len(), 1, "one entry per name: {entries:?}");
     assert_eq!(matches[0].path, project_skill.to_string_lossy());
+}
+
+#[test]
+fn termul_skill_list_comes_first() {
+    let tree = TempTree::new("termul-first");
+    let home = tree.0.join("home");
+    let project = tree.0.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let plugin_md = write_skill(
+        &home.join(".claude/plugins/cache/acme/tools/1.0.0/skills"),
+        "deploy",
+        Some("deploy"),
+    );
+    write_skill(&project.join(".opencode/skills"), "deploy", Some("deploy"));
+    let harness_only = write_skill(&project.join(".opencode/skills"), "lint", Some("lint"));
+    let termul_skills = vec![AgentSkillSummary {
+        name: "Deploy".to_string(),
+        description: "d".to_string(),
+        scope: "global".to_string(),
+        path: plugin_md.to_string_lossy().to_string(),
+    }];
+
+    let entries = list_skill_files_with_roots(
+        &termul_skills,
+        Some(&home),
+        None,
+        Some(&project.to_string_lossy()),
+    )
+    .unwrap();
+
+    let deploy: Vec<_> = entries
+        .iter()
+        .filter(|e| e.name.eq_ignore_ascii_case("deploy"))
+        .collect();
+    assert_eq!(deploy.len(), 1, "one entry per name: {entries:?}");
+    assert_eq!(deploy[0].path, plugin_md.to_string_lossy());
+    assert_eq!(
+        path_of(&entries, "lint"),
+        Some(harness_only.to_string_lossy().as_ref())
+    );
 }
 
 #[test]
@@ -116,7 +161,8 @@ fn walks_up_from_a_nested_project_to_the_git_root() {
         Some("outside-skill"),
     );
 
-    let entries = list_skill_files_with_roots(None, None, Some(&nested.to_string_lossy())).unwrap();
+    let entries =
+        list_skill_files_with_roots(&[], None, None, Some(&nested.to_string_lossy())).unwrap();
 
     assert_eq!(
         path_of(&entries, "repo-skill"),
@@ -142,7 +188,7 @@ fn without_a_git_root_only_the_project_dir_is_searched() {
     );
 
     let entries =
-        list_skill_files_with_roots(None, None, Some(&project.to_string_lossy())).unwrap();
+        list_skill_files_with_roots(&[], None, None, Some(&project.to_string_lossy())).unwrap();
 
     assert_eq!(
         path_of(&entries, "own-skill"),
@@ -158,13 +204,13 @@ fn skips_folders_without_skill_md() {
     fs::create_dir_all(home.join(".agents/skills/empty")).unwrap();
     fs::write(home.join(".agents/skills/stray.md"), "x").unwrap();
 
-    let entries = list_skill_files_with_roots(Some(&home), None, None).unwrap();
+    let entries = list_skill_files_with_roots(&[], Some(&home), None, None).unwrap();
 
     assert!(entries.is_empty(), "{entries:?}");
 }
 
 #[test]
 fn rejects_a_relative_project_root() {
-    let err = list_skill_files_with_roots(None, None, Some("relative/path")).unwrap_err();
+    let err = list_skill_files_with_roots(&[], None, None, Some("relative/path")).unwrap_err();
     assert!(err.contains("must be absolute"), "{err}");
 }

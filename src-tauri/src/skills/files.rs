@@ -2,12 +2,13 @@
 //! `SKILL.md`, so chat chips (skill pills and skill-backed slash commands) can
 //! open the file in the editor.
 //!
-//! Termul's own discovery (`list_agent_skills`) reads only the `.agents/skills`
-//! roots. Harnesses also publish skills from their own roots as slash commands
-//! (OpenCode turns every discovered skill into a command), so this index adds
-//! those roots. Project roots come first and override global roots; inside a
-//! group the first root that names a skill wins. Names compare
-//! case-insensitively, like the slash menu.
+//! Termul's own skill list (`list_agent_skills`: the `.agents/skills` roots
+//! and Claude Code user and plugin skills) comes first, so a skill chip opens
+//! the same file the slash menu cited. Harnesses also publish skills from
+//! their own roots as slash commands (OpenCode turns every discovered skill
+//! into a command), so this index adds those roots after it. Project roots
+//! come before global roots; the first source that names a skill wins. Names
+//! compare case-insensitively, like the slash menu.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -15,7 +16,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use super::parse_skill_md;
+use super::{list_agent_skills, parse_skill_md, AgentSkillSummary};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -123,9 +124,11 @@ fn index_skills_dir(dir: &Path, seen: &mut HashSet<String>, out: &mut Vec<SkillF
 
 /// Index every skill `SKILL.md` visible from `project_root`.
 ///
-/// `home` and `config_home` are injected so tests can use temp dirs without
-/// mutating the process-wide `HOME` / `XDG_CONFIG_HOME`.
+/// `termul_skills` is Termul's own skill list for the same root. `home` and
+/// `config_home` are injected so tests can use temp dirs without mutating the
+/// process-wide `HOME` / `XDG_CONFIG_HOME`.
 pub fn list_skill_files_with_roots(
+    termul_skills: &[AgentSkillSummary],
     home: Option<&Path>,
     config_home: Option<&Path>,
     project_root: Option<&str>,
@@ -152,6 +155,14 @@ pub fn list_skill_files_with_roots(
 
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
+    for skill in termul_skills {
+        if seen.insert(skill.name.to_lowercase()) {
+            entries.push(SkillFileEntry {
+                name: skill.name.clone(),
+                path: skill.path.clone(),
+            });
+        }
+    }
     for root in &roots {
         index_skills_dir(root, &mut seen, &mut entries);
     }
@@ -163,11 +174,21 @@ pub fn list_skill_files_with_roots(
     Ok(entries)
 }
 
-/// Index skill files using the real user home and config dirs.
+/// Index skill files using the real user home and config dirs. A failed
+/// Termul skill listing degrades to the harness roots only.
 pub fn list_skill_files(project_root: Option<&str>) -> Result<Vec<SkillFileEntry>, String> {
+    let termul_skills = list_agent_skills(project_root).unwrap_or_else(|e| {
+        log::warn!("skill index: Termul skill listing failed, using harness roots only: {e}");
+        Vec::new()
+    });
     let home = home_dir();
     let config = config_dir(home.as_deref());
-    list_skill_files_with_roots(home.as_deref(), config.as_deref(), project_root)
+    list_skill_files_with_roots(
+        &termul_skills,
+        home.as_deref(),
+        config.as_deref(),
+        project_root,
+    )
 }
 
 #[cfg(test)]
