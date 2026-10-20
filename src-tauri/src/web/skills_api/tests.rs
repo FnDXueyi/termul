@@ -42,6 +42,7 @@ fn test_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/skills", get(list))
         .route("/skills/{name}", get(read))
+        .route("/skills-index", get(files))
         .with_state(state)
 }
 
@@ -110,6 +111,53 @@ async fn list_skills_rejects_project_root_outside_every_registered_project() {
     let resp = get_request(state, &uri).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: IpcBody<Vec<AgentSkillSummary>> = body_as_json(resp.into_body()).await;
+    assert!(
+        !body.success,
+        "outside-project-root projectRoot must be rejected"
+    );
+    assert_eq!(body.code.as_deref(), Some("OUTSIDE_PROJECT_ROOT"));
+}
+
+#[tokio::test]
+async fn skill_index_lists_project_harness_skills() {
+    let root = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join(format!("termul-skills-index-route-{}", std::process::id()));
+    let skill_dir = root.join(".opencode").join("skills").join("route-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill_md = skill_dir.join("SKILL.md");
+    std::fs::write(&skill_md, "---\nname: route-skill\n---\n\nbody\n").unwrap();
+
+    let uri = format!("/skills-index?projectRoot={}", root.display());
+    let resp = get_request(test_state(), &uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<Vec<SkillFileEntry>> = body_as_json(resp.into_body()).await;
+    assert!(body.success, "skill index should succeed: {:?}", body.error);
+    let entries = body.data.expect("data array");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.name == "route-skill" && e.path == skill_md.to_string_lossy()),
+        "{entries:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn skill_index_rejects_project_root_outside_every_registered_project() {
+    let root = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let outside = root
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let uri = format!("/skills-index?projectRoot={}", outside.display());
+    let resp = get_request(test_state(), &uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<Vec<SkillFileEntry>> = body_as_json(resp.into_body()).await;
     assert!(
         !body.success,
         "outside-project-root projectRoot must be rejected"

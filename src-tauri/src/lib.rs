@@ -1973,6 +1973,7 @@ pub fn run() {
             // Agent Skills (Zed-compatible SKILL.md packages)
             skills::commands::list_agent_skills_cmd,
             skills::commands::read_agent_skill_cmd,
+            skills::commands::list_skill_files_cmd,
             // Remote server commands
             commands::remote_server_start,
             commands::remote_server_stop,

@@ -25,6 +25,7 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::skills::files::SkillFileEntry;
 use crate::skills::{AgentSkillContent, AgentSkillSummary};
 use crate::web::fs_api::IpcBody;
 use crate::web::ws::AppState;
@@ -143,6 +144,54 @@ pub async fn read(
                 format!("skills read task failed: {e}"),
                 "SKILL_READ_ERROR",
             )
+        }
+    };
+    (StatusCode::OK, Json(body))
+}
+
+/// `GET /skills-index?projectRoot=` — index every skill `SKILL.md` an agent
+/// can load (Termul's `.agents` roots plus the harness roots). Reuses
+/// `crate::skills::files::list_skill_files` (same function the
+/// `#[tauri::command] list_skill_files_cmd` calls). Not nested under
+/// `/skills/` so it cannot shadow a skill named by `/skills/{name}`; the
+/// `/skills` gate prefix still covers it. Degrades to an empty list.
+pub async fn files(
+    State(state): State<AppState>,
+    Query(q): Query<SkillsQuery>,
+) -> impl IntoResponse {
+    if let Some(pr) = &q.project_root {
+        if let Ok(canonical) = std::path::Path::new(pr).canonicalize() {
+            if let Some(err) = crate::web::git_api::ensure_within_project_boundary::<
+                Vec<SkillFileEntry>,
+            >(&canonical, &state.registry)
+            {
+                tracing::warn!(
+                    "[Security] /skills-index rejected: projectRoot '{}' outside every registered project",
+                    canonical.display()
+                );
+                return (StatusCode::OK, Json(err));
+            }
+        }
+    }
+    let project_root = q.project_root;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::skills::files::list_skill_files(project_root.as_deref())
+    })
+    .await
+    .map_err(|e| format!("skill index task failed: {e}"));
+
+    let body = match result {
+        Ok(Ok(entries)) => {
+            tracing::debug!("skill index listed {} skill file(s)", entries.len());
+            IpcBody::ok(entries)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("skill index failed (degrading to empty list): {e}");
+            IpcBody::ok(Vec::<SkillFileEntry>::new())
+        }
+        Err(e) => {
+            tracing::error!("skill index task panicked: {e}");
+            IpcBody::ok(Vec::<SkillFileEntry>::new())
         }
     };
     (StatusCode::OK, Json(body))
