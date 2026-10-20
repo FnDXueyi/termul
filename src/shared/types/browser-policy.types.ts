@@ -2,8 +2,8 @@
  * Browser policy contract: the host-owned rules that govern agent browsing,
  * at two levels. Per project: an allow-list of origins, pre-approvals keyed
  * by (action, origin) and an opt-out to ephemeral browsing. App-wide: the
- * global agent profile switch, app-scoped pre-approvals and clearing the
- * global agent profile.
+ * global agent profile switch, whether password submits prompt, app-scoped
+ * pre-approvals and clearing the global agent profile.
  *
  * Desktop (Tauri commands) and remote clients (HTTP routes) exchange these
  * shapes unchanged. Edits are operations applied against a revision; a stale
@@ -29,11 +29,12 @@ export const PROJECT_PREAPPROVABLE_ACTIONS = [
 ] as const satisfies readonly BrowserActionClass[]
 
 /**
- * Action classes an app-wide pre-approval may name. Password and payment
- * submits are absent on purpose: the global profile is shared by every
- * project, so those always prompt.
+ * Action classes an app-wide pre-approval may name. Payment submits are
+ * absent on purpose: the global profile is shared by every project, so those
+ * always prompt.
  */
 export const APP_PREAPPROVABLE_ACTIONS = [
+  'password_submit',
   'upload',
   'download',
   'tainted_exfil'
@@ -72,6 +73,8 @@ export interface AppBrowserPolicy {
   globalProfileEnabled: boolean
   /** The switch is on and this system can keep a shared profile (macOS needs 14). */
   effectiveGlobalProfile: boolean
+  /** Prompt before an agent submits a password. Off by default. */
+  askBeforePasswordSubmit: boolean
   preapprovals: BrowserPreapproval[]
   clearImpact: BrowserProfileClearImpact
 }
@@ -85,6 +88,7 @@ export type ProjectBrowserPolicyOp =
 
 export type AppBrowserPolicyOp =
   | { op: 'set_global_profile'; enabled: boolean }
+  | { op: 'set_ask_before_password_submit'; enabled: boolean }
   | { op: 'add_preapproval'; action: BrowserActionClass; origin: string }
   | { op: 'remove_preapproval'; action: BrowserActionClass; origin: string }
   | { op: 'clear_global_profile' }

@@ -166,8 +166,13 @@ async fn an_unparseable_file_fails_closed_and_is_left_as_it_is() {
     let app = files.read_app().await.unwrap();
     let project = files.read_project("p1").await.unwrap();
     assert_eq!(
-        (app.read_only, app.global_profile_enabled, app.preapprovals.len()),
-        (true, false, 0)
+        (
+            app.read_only,
+            app.global_profile_enabled,
+            app.ask_before_password_submit,
+            app.preapprovals.len()
+        ),
+        (true, false, true, 0)
     );
     assert_eq!(
         (project.read_only, project.profile_mode, project.allow_list.len()),
@@ -206,8 +211,8 @@ async fn entries_a_scope_cannot_hold_are_dropped_on_load() {
 
     let policy = files.read_app().await.unwrap();
     assert!(!policy.global_profile_enabled);
-    assert_eq!(policy.preapprovals.len(), 1);
-    assert_eq!(policy.preapprovals[0].action, ActionClass::Upload);
+    let kept: Vec<ActionClass> = policy.preapprovals.iter().map(|p| p.action).collect();
+    assert_eq!(kept, [ActionClass::PasswordSubmit, ActionClass::Upload]);
 }
 
 #[tokio::test]

@@ -116,6 +116,17 @@ describe('BrowserPolicySettings', () => {
     expect(host.app.globalProfileEnabled).toBe(false)
   })
 
+  it('asks before password submits only once the user turns it on', async () => {
+    render(<BrowserPolicySettings />)
+    const ask = await screen.findByRole('switch', {
+      name: 'Ask before an agent submits a password'
+    })
+    expect(ask).not.toBeChecked()
+    fireEvent.click(ask)
+    await waitFor(() => expect(ask).toBeChecked())
+    expect(host.app.askBeforePasswordSubmit).toBe(true)
+  })
+
   it('says when agents browse logged out although the shared profile is requested', async () => {
     host.engineKeepsGlobal = false
     render(<BrowserPolicySettings />)
@@ -152,7 +163,7 @@ describe('BrowserPolicySettings', () => {
   })
 
   it('offers only actions each scope may pre-approve', () => {
-    expect(APP_PREAPPROVABLE_ACTIONS).not.toContain('password_submit')
+    expect(APP_PREAPPROVABLE_ACTIONS).toContain('password_submit')
     expect(APP_PREAPPROVABLE_ACTIONS).not.toContain('payment_submit')
     expect(PROJECT_PREAPPROVABLE_ACTIONS).toEqual(
       expect.arrayContaining(['password_submit', 'payment_submit', 'upload', 'download'])

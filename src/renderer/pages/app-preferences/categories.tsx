@@ -322,6 +322,13 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
   },
   {
     categoryId: 'browser',
+    label: 'Ask before an agent submits a password',
+    description: 'Have agents ask you before they sign in to a site.',
+    keywords: ['browser', 'password', 'sign in', 'login', 'prompt', 'ask', 'automation'],
+    anchorId: BROWSER_ANCHORS.appPasswordPrompt
+  },
+  {
+    categoryId: 'browser',
     label: 'Clear agent profile',
     description: 'Delete the shared agent profile logins and site data.',
     keywords: ['browser', 'cookies', 'sign out', 'logins', 'wipe', 'reset'],

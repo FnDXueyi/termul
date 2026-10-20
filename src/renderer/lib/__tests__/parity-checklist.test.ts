@@ -2236,6 +2236,7 @@ describe('Browser policy parity', () => {
       remove_preapproval: 'RemovePreapproval',
       set_ephemeral: 'SetEphemeral',
       set_global_profile: 'SetGlobalProfile',
+      set_ask_before_password_submit: 'SetAskBeforePasswordSubmit',
       clear_global_profile: 'ClearGlobalProfile'
     }
     for (const [name, variant] of Object.entries(variants)) {

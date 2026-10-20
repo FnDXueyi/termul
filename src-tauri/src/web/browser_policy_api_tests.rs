@@ -265,21 +265,28 @@ async fn the_command_and_the_route_return_identical_bodies_for_the_same_operatio
         ),
         (
             Step::App {
-                revision: 1,
+                revision: 2,
                 op: json!({"op": "add_preapproval", "action": "download", "origin": "https://files.example"}),
             },
             admin(),
         ),
         (
             Step::App {
-                revision: 2,
+                revision: 3,
                 op: json!({"op": "remove_preapproval", "action": "download", "origin": "https://files.example"}),
             },
             admin(),
         ),
         (
             Step::App {
-                revision: 3,
+                revision: 4,
+                op: json!({"op": "set_ask_before_password_submit", "enabled": true}),
+            },
+            admin(),
+        ),
+        (
+            Step::App {
+                revision: 5,
                 op: json!({"op": "clear_global_profile"}),
             },
             admin(),
@@ -294,7 +301,7 @@ async fn the_command_and_the_route_return_identical_bodies_for_the_same_operatio
         successes += usize::from(from_command["success"] == true);
     }
     assert_eq!(
-        successes, 12,
+        successes, 14,
         "the scripted sequence mixes successes and refusals"
     );
     assert_eq!(
