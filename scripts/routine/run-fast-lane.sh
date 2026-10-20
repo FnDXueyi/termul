@@ -19,6 +19,15 @@ set -uo pipefail
 PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 export PATH
 
+# Disk guard: the full-disk incident (2026-10-20) silently corrupted every
+# gate (empty baselines, "0 tests" files). Refuse to run gates on a full disk.
+AVAIL_MB=$(df -m / | awk 'NR==2 {print $4}')
+if [ "$AVAIL_MB" -lt 10240 ]; then
+  echo "$(date -u +%FT%TZ) only ${AVAIL_MB}MB free; routine run skipped (gate needs ~10G)" \
+    >> /root/termul-routine-automation/goal-routine-runs/_automation/skips.log
+  exit 0
+fi
+
 REPO="/root/termul-routine-automation"
 WORKERS="${TERMUL_FAST_WORKERS:-3}"
 LOG_DIR="$REPO/goal-routine-runs/_automation"
@@ -119,6 +128,8 @@ worker () {
   }
   (
     cd "$wt" || exit 0
+    # One shared cargo cache for all workers; per-worker targets cost ~20G each.
+    export CARGO_TARGET_DIR="$REPO/.cargo-target"
     omp -p \
       --model 'sepintu/zai/glm-5.3' \
       --thinking max \
