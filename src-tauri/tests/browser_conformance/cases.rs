@@ -104,6 +104,7 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("frame_focused_password_submit", &["fill"]),
     cap("frame_upload", &["snapshot"]),
     cap("frame_file_chooser", &["click"]),
+    cap("frame_denied_origin", &["snapshot"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -607,6 +608,7 @@ pub async fn run(
         "frame_focused_password_submit" => frames::frame_focused_password_submit(&ctx).await,
         "frame_upload" => frames::frame_upload(&ctx).await,
         "frame_file_chooser" => frames::frame_file_chooser(&ctx).await,
+        "frame_denied_origin" => frames::frame_denied_origin(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };
     engine.end_session(&ctx.session);

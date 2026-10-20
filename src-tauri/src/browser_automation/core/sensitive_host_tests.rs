@@ -376,6 +376,7 @@ async fn framed_rig() -> (Rig, String) {
         owner_path: "html>body>iframe:nth-of-type(1)".into(),
     });
     let r = rig_with(engine, vec![]);
+    r.allow_list(PAY).await;
     let tab = r.open(LOGIN).await;
     (r, tab)
 }

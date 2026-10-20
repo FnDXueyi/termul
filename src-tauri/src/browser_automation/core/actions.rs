@@ -263,7 +263,7 @@ impl DesktopBrowserHost {
             }
             Verb::Snapshot => {
                 let label = self.resolve_tab(session_id, args)?;
-                let snapshot = self.snapshot_page(&label).await?;
+                let snapshot = self.snapshot_page(session_id, &label).await?;
                 let (page, refs) = self.mint_snapshot(&label, snapshot)?;
                 Ok(Success {
                     tab: Some(self.tab_facts(&label)?),

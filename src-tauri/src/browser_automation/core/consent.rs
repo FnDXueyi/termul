@@ -497,6 +497,8 @@ impl DesktopBrowserHost {
                     deadline,
                 },
             )
+            .await?;
+        self.authorize_frames(token, session_id, call, &project_id, profile, deadline)
             .await
     }
 }

@@ -428,6 +428,11 @@ pub(super) enum SnapshotItem {
         depth: usize,
         name: String,
         path: String,
+        /// The frame's origin when the host reached the frame but the
+        /// session may not read it. Set by the host, never read from the
+        /// helper's reply.
+        #[serde(skip)]
+        unauthorized: Option<String>,
     },
 }
 
@@ -547,9 +552,15 @@ fn format_snapshot(
             SnapshotItem::Text { depth, text } => {
                 format!("{}- text \"{}\"", indent(*depth), outline_text(text))
             }
-            SnapshotItem::Frame { depth, name, .. } => {
+            SnapshotItem::Frame { depth, name, unauthorized: None, .. } => {
                 format!("{}- iframe \"{}\" {UNREACHABLE_FRAME}", indent(*depth), outline_text(name))
             }
+            SnapshotItem::Frame { depth, name, unauthorized: Some(origin), .. } => format!(
+                "{}- iframe \"{}\" (cross-origin frame on {}, not authorized for this session)",
+                indent(*depth),
+                outline_text(name),
+                outline_text(origin)
+            ),
         };
         lines.push(line);
     }

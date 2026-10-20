@@ -63,6 +63,7 @@ fn route(path: &str) -> Reply {
         "/frames-same.html" => Reply::Page(include_str!("pages/frames-same.html")),
         "/frames-cross.html" => Reply::Page(include_str!("pages/frames-cross.html")),
         "/frame-inner.html" => Reply::Page(include_str!("pages/frame-inner.html")),
+        "/frames-data.html" => Reply::Page(include_str!("pages/frames-data.html")),
         "/shadow.html" => Reply::Page(include_str!("pages/shadow.html")),
         "/csp.html" => Reply::StrictPage(include_str!("pages/csp.html")),
         "/api/ping" => Reply::Typed("application/json", r#"{"ok":true}"#),

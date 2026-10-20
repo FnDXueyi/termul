@@ -173,6 +173,21 @@ pub async fn frame_file_chooser(c: &Ctx<'_>) -> CaseResult {
     expect_tickets(c, &[], "a frame-opened file chooser")
 }
 
+/// A frame on an origin the perimeter denies (here a `data:` document,
+/// whose origin is opaque) is never read, on engines that reach
+/// cross-origin frames as on those that do not.
+pub async fn frame_denied_origin(c: &Ctx<'_>) -> CaseResult {
+    c.open("/frames-data.html", "Data frame ready").await?;
+    let outline = c.outline_with("- iframe \"Data frame\"").await?;
+    if !outline.contains("- iframe \"Data frame\"") {
+        return Err(mismatch(format!("the outline does not show the frame: {outline}")));
+    }
+    if outline.contains("Data button") {
+        return Err(mismatch(format!("a frame on a denied origin was read: {outline}")));
+    }
+    expect_tickets(c, &[], "reading a page with a denied frame")
+}
+
 pub async fn shadow_dom(c: &Ctx<'_>) -> CaseResult {
     c.open("/shadow.html", SHADOW_READY).await?;
     let outline = c.snapshot().await?.text;
