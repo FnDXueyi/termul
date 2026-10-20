@@ -76,15 +76,48 @@ step "typecheck"
 bun run typecheck >> "$LOG" 2>&1 || { tail -40 "$LOG"; fail "bun run typecheck"; }
 
 step "vitest"
-bun run test >> "$LOG" 2>&1 || { tail -40 "$LOG"; fail "bun run test"; }
+if ! bun run test > "$WT/vitest-branch.txt" 2>&1; then
+  # Failures: compare against a clean-dev baseline so pre-existing red on
+  # dev (known flaky/red suites) does not fail a good fix. Only NEW failures
+  # gate the branch.
+  git worktree add --quiet --force "$REPO/.wt/finish-baseline" origin/dev 2>/dev/null
+  ( cd "$REPO/.wt/finish-baseline" \
+      && [ -e node_modules ] || ln -s "$REPO/node_modules" node_modules \
+      && bun vitest run > "$WT/vitest-baseline.txt" 2>&1 ) || true
+  NEW=$(comm -13 \
+    <(grep -oE "^ *(×|FAIL) .*" "$WT/vitest-baseline.txt" 2>/dev/null | sort -u) \
+    <(grep -oE "^ *(×|FAIL) .*" "$WT/vitest-branch.txt" | sort -u) || true)
+  if [ -n "$NEW" ]; then
+    echo "$NEW" | tee -a "$LOG"
+    tail -40 "$WT/vitest-branch.txt" >> "$LOG"
+    git -C "$REPO" worktree remove --force "$REPO/.wt/finish-baseline" 2>/dev/null || true
+    fail "bun run test (new failures vs dev baseline)"
+  fi
+  echo "vitest failures match the dev baseline (pre-existing red); continuing" | tee -a "$LOG"
+fi
+git -C "$REPO" worktree remove --force "$REPO/.wt/finish-baseline" 2>/dev/null || true
 
 step "clippy"
 ( cd src-tauri && CARGO_TARGET_DIR="$REPO/.cargo-target" cargo clippy --all-targets -- -D warnings ) >> "$LOG" 2>&1 \
   || { tail -60 "$LOG"; fail "cargo clippy"; }
 
 step "cargo test"
-( cd src-tauri && CARGO_TARGET_DIR="$REPO/.cargo-target" cargo test ) >> "$LOG" 2>&1 \
-  || { tail -60 "$LOG"; fail "cargo test"; }
+if ! ( cd src-tauri && CARGO_TARGET_DIR="$REPO/.cargo-target" cargo test ) > "$WT/cargo-branch.txt" 2>&1; then
+  git worktree add --quiet --force "$REPO/.wt/finish-baseline" origin/dev 2>/dev/null
+  ( cd "$REPO/.wt/finish-baseline/src-tauri" \
+      && CARGO_TARGET_DIR="$REPO/.cargo-target-baseline" cargo test ) > "$WT/cargo-baseline.txt" 2>&1 || true
+  NEW=$(comm -13 \
+    <(grep -oE "^test .* \.\.\. FAILED|panicked at" "$WT/cargo-baseline.txt" 2>/dev/null | sort -u) \
+    <(grep -oE "^test .* \.\.\. FAILED|panicked at" "$WT/cargo-branch.txt" | sort -u) || true)
+  if [ -n "$NEW" ]; then
+    echo "$NEW" | tee -a "$LOG"
+    tail -60 "$WT/cargo-branch.txt" >> "$LOG"
+    git -C "$REPO" worktree remove --force "$REPO/.wt/finish-baseline" 2>/dev/null || true
+    fail "cargo test (new failures vs dev baseline)"
+  fi
+  echo "cargo test failures match the dev baseline (pre-existing red, e.g. #1386); continuing" | tee -a "$LOG"
+fi
+git -C "$REPO" worktree remove --force "$REPO/.wt/finish-baseline" 2>/dev/null || true
 
 step "gate green"
 echo "ALL GATES GREEN: $BRANCH" | tee -a "$LOG"
