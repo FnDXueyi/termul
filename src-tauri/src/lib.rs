@@ -1641,13 +1641,9 @@ pub fn run() {
             // Host-originated browser consent tickets: answerable from the
             // desktop command or a qualified `/ws` client, raised only while
             // someone is subscribed to the session.
-            let host_tickets = {
-                let relay = Arc::clone(&ws_relay);
-                Arc::new(acp::host_ticket::HostTickets::new(
-                    vec![ws_relay.clone()],
-                    Box::new(move |session_id| relay.session_subscriber_count(session_id) > 0),
-                ))
-            };
+            let host_tickets = Arc::new(acp::host_ticket::HostTickets::for_relay(Arc::clone(
+                &ws_relay,
+            )));
             rendezvous.set_host_tickets(Arc::clone(&host_tickets));
             app.manage(Arc::clone(&host_tickets));
             ws_relay.set_rendezvous(rendezvous);
