@@ -234,17 +234,42 @@ pub async fn permissions(c: &Ctx<'_>) -> CaseResult {
     c.call("wait", json!({ "text": "Permissions settled" }))
         .await?;
     let text = c.page_text(&c.tab().await?).await?;
-    // A runner without capture devices fails camera and mic before any
-    // permission check, so any media error counts; geolocation always asks
-    // and must come back PERMISSION_DENIED (code 1).
-    for line in [
-        "camera: denied",
-        "microphone: denied",
-        "geolocation: denied code 1",
-    ] {
-        if !text.contains(line) {
-            return Err(mismatch(format!("expected \"{line}\": {text}")));
+    // The host's deny handler logs every answer it gives. `NotAllowedError`
+    // is that refusal reaching the page. A runner with no capture device
+    // (GitHub's Windows image has none) fails camera and microphone with
+    // `NotFoundError` before any permission check, so on WebView2 that
+    // error says nothing about the handler; the geolocation request does
+    // reach it, and its logged denial proves the handler is wired on the
+    // agent tab. Geolocation must come back PERMISSION_DENIED (code 1).
+    let media_errors: &[&str] = if cfg!(windows) {
+        &["NotAllowedError", "NotFoundError"]
+    } else {
+        &[""]
+    };
+    for id in ["camera", "microphone"] {
+        let line = media_errors
+            .iter()
+            .map(|error| format!("{id}: denied {error}").trim_end().to_string())
+            .find(|line| text.contains(line.as_str()));
+        let Some(line) = line else {
+            return Err(mismatch(format!("{id} was not refused: {text}")));
+        };
+        let reached_handler = line.ends_with("NotAllowedError");
+        if reached_handler && crate::host_log::permission_response(id).as_deref() != Some("deny") {
+            return Err(mismatch(format!(
+                "{id} reads as refused by the host but the handler logged no denial: {text}"
+            )));
         }
+    }
+    if !text.contains("geolocation: denied code 1") {
+        return Err(mismatch(format!("expected a geolocation refusal: {text}")));
+    }
+    let geolocation_denied =
+        crate::host_log::permission_response("geolocation").as_deref() == Some("deny");
+    if cfg!(windows) && !geolocation_denied {
+        return Err(mismatch(format!(
+            "the host's deny handler logged no geolocation denial: {text}"
+        )));
     }
     Ok(())
 }
