@@ -998,6 +998,16 @@ export function AgentChatPanel({
         </div>
       ) : (
         <div ref={dockRef} data-chat-dock="true" className={dockClassName}>
+          {/* Above the changed-files panel: that panel's negative bottom margin
+              tucks it under the composer, so anything between the two is
+              painted over and loses its clicks. */}
+          {!isClosed && (
+            <div className={CHAT_GUTTER_X}>
+              <div className="mx-auto w-full max-w-3xl">
+                <ClaudeLimitNotice sessionId={sessionId} />
+              </div>
+            </div>
+          )}
           <ChatChangedFilesPanel
             cwd={session.cwd}
             toolCalls={toolCalls}
@@ -1006,13 +1016,6 @@ export function AgentChatPanel({
               isMobileShell ? (opener) => openGitSheet(session.cwd, opener) : undefined
             }
           />
-          {!isClosed && (
-            <div className={CHAT_GUTTER_X}>
-              <div className="mx-auto w-full max-w-3xl">
-                <ClaudeLimitNotice sessionId={sessionId} />
-              </div>
-            </div>
-          )}
           <ChatInputBar
             session={composerSession ?? session}
             projectRoot={skillsProjectRoot}
