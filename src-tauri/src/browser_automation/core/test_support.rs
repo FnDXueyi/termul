@@ -47,8 +47,6 @@ impl PermissionRequest for ScriptedPermissions {
 /// Policy store with the real revision compare-and-swap, held in memory.
 #[derive(Default)]
 pub struct InMemoryPolicyStore {
-    /// The "ask before an agent submits a password" setting.
-    pub ask_password: std::sync::atomic::AtomicBool,
     projects: Mutex<HashMap<String, ProjectPolicy>>,
     app: Mutex<AppPolicy>,
 }
@@ -109,10 +107,5 @@ impl PolicyStore for InMemoryPolicyStore {
                 policy
             });
         Box::pin(async move { result })
-    }
-
-    fn asks_before_password_submit(&self) -> PortFuture<'_, bool> {
-        let ask = self.ask_password.load(std::sync::atomic::Ordering::SeqCst);
-        Box::pin(async move { ask })
     }
 }

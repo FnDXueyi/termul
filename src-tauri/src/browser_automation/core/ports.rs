@@ -149,11 +149,6 @@ pub trait PolicyStore: Send + Sync {
         expected_revision: u64,
         op: AppPolicyOp,
     ) -> PortFuture<'_, Result<AppPolicy, PolicyRefusal>>;
-    /// The app-wide "ask before an agent submits a password" setting. A
-    /// store that keeps no such setting answers off.
-    fn asks_before_password_submit(&self) -> PortFuture<'_, bool> {
-        Box::pin(async { false })
-    }
 }
 
 #[cfg(test)]

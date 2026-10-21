@@ -55,10 +55,12 @@ impl ActionClass {
         !matches!(self, Self::Navigate | Self::LocalNetwork)
     }
 
-    /// Password and payment submits: never pre-approvable on global-profile
-    /// tabs, because that profile's logins are shared by every project.
-    pub const fn is_credential_submit(self) -> bool {
-        matches!(self, Self::PasswordSubmit | Self::PaymentSubmit)
+    /// Whether global-profile tabs may pre-approve the class. Payment
+    /// submits never: that profile's logged-in sessions are shared by every
+    /// project. Password submits may; whether they prompt at all is the
+    /// user's app-wide choice.
+    pub const fn is_app_preapprovable(self) -> bool {
+        self.is_preapprovable() && !matches!(self, Self::PaymentSubmit)
     }
 }
 
@@ -74,8 +76,7 @@ pub struct Preapproval {
 pub struct ProjectPreapproval(Preapproval);
 
 /// A pre-approval that global-profile tabs honour, in every project. The
-/// constructor refuses password and payment submits, so such an entry
-/// cannot exist.
+/// constructor refuses payment submits, so such an entry cannot exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPreapproval(Preapproval);
 
@@ -98,7 +99,7 @@ impl AppPreapproval {
     }
 
     pub fn new(action: ActionClass, origin: CanonicalOrigin) -> Result<Self, PolicyRefusal> {
-        if !action.is_preapprovable() || action.is_credential_submit() {
+        if !action.is_app_preapprovable() {
             return Err(PolicyRefusal::PreapprovalNotAllowed);
         }
         Ok(Self(Preapproval { action, origin }))
@@ -132,6 +133,9 @@ pub struct AppPolicy {
     pub revision: u64,
     pub read_only: bool,
     pub global_profile_enabled: bool,
+    /// Prompt before an agent submits a password. Off by default: agents
+    /// sign in like the user would.
+    pub ask_before_password_submit: bool,
     /// Pre-approvals honoured on global-profile tabs ("all projects").
     pub preapprovals: Vec<Preapproval>,
 }
@@ -142,6 +146,7 @@ impl Default for AppPolicy {
             revision: 0,
             read_only: false,
             global_profile_enabled: true,
+            ask_before_password_submit: false,
             preapprovals: Vec::new(),
         }
     }
@@ -159,6 +164,7 @@ pub enum ProjectPolicyOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppPolicyOp {
     SetGlobalProfile(bool),
+    SetAskBeforePasswordSubmit(bool),
     AddPreapproval(AppPreapproval),
     RemovePreapproval(Preapproval),
 }
@@ -237,6 +243,11 @@ impl AppPolicy {
                 self.global_profile_enabled = enabled;
                 Ok(changed)
             }
+            AppPolicyOp::SetAskBeforePasswordSubmit(ask) => {
+                let changed = self.ask_before_password_submit != ask;
+                self.ask_before_password_submit = ask;
+                Ok(changed)
+            }
             AppPolicyOp::AddPreapproval(AppPreapproval(item)) => {
                 set_membership(&mut self.preapprovals, item, true, MAX_PREAPPROVALS)
             }
@@ -248,7 +259,7 @@ impl AppPolicy {
 
     /// Whether `action` on `origin` is pre-approved for global-profile tabs.
     pub fn preapproves(&self, action: ActionClass, origin: &CanonicalOrigin) -> bool {
-        !action.is_credential_submit()
+        action.is_app_preapprovable()
             && self
                 .preapprovals
                 .iter()

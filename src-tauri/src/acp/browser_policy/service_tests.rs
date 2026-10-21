@@ -340,35 +340,91 @@ async fn a_port_termul_starts_listening_on_later_is_refused_at_the_next_edit() {
 }
 
 #[tokio::test]
-async fn password_and_payment_submits_can_never_be_pre_approved_for_global_tabs() {
+async fn global_tabs_may_pre_approve_password_submits_but_never_payment_submits() {
     let dir = tempfile::tempdir().unwrap();
     let f = fixture(dir.path(), vec![]);
-    for action in ["password_submit", "payment_submit"] {
-        let refusal = f
-            .service
-            .apply_app(
-                &CallerScope::App,
-                0,
-                &json!({"op": "add_preapproval", "action": action, "origin": "https://bank.example"}),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            (refusal.code().as_str(), refusal.reason()),
-            ("invalid_params", "preapproval_not_allowed")
-        );
-    }
-    let app = f.service.app_view(&CallerScope::App).await.unwrap();
-    assert!(app.preapprovals.is_empty());
-    assert_eq!(app.revision, 0);
+    let refusal = f
+        .service
+        .apply_app(
+            &CallerScope::App,
+            0,
+            &json!({"op": "add_preapproval", "action": "payment_submit", "origin": "https://shop.example"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refusal.code().as_str(), refusal.reason()),
+        ("invalid_params", "preapproval_not_allowed")
+    );
+    let app = f
+        .service
+        .apply_app(
+            &CallerScope::App,
+            0,
+            &json!({"op": "add_preapproval", "action": "password_submit", "origin": "https://bank.example"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&app.preapprovals).unwrap(),
+        json!([{"action": "password_submit", "origin": "https://bank.example"}])
+    );
 
     let mut policy = AppPolicy::default();
-    let origin = CanonicalOrigin::parse("https://bank.example").unwrap();
-    policy.preapprovals.push(Preapproval {
-        action: ActionClass::PasswordSubmit,
-        origin: origin.clone(),
-    });
-    assert!(!policy.preapproves(ActionClass::PasswordSubmit, &origin));
+    let shop = CanonicalOrigin::parse("https://shop.example").unwrap();
+    let bank = CanonicalOrigin::parse("https://bank.example").unwrap();
+    for (action, origin) in [
+        (ActionClass::PaymentSubmit, &shop),
+        (ActionClass::PasswordSubmit, &bank),
+    ] {
+        policy.preapprovals.push(Preapproval {
+            action,
+            origin: origin.clone(),
+        });
+    }
+    assert_eq!(
+        (
+            policy.preapproves(ActionClass::PaymentSubmit, &shop),
+            policy.preapproves(ActionClass::PasswordSubmit, &bank)
+        ),
+        (false, true),
+        "a stored payment entry never grants"
+    );
+}
+
+#[tokio::test]
+async fn asking_before_password_submits_is_an_app_switch_that_starts_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = fixture(dir.path(), vec![]);
+    let set = |revision: u64, enabled: bool| {
+        let service = f.service.clone();
+        async move {
+            service
+                .apply_app(
+                    &CallerScope::App,
+                    revision,
+                    &json!({"op": "set_ask_before_password_submit", "enabled": enabled}),
+                )
+                .await
+        }
+    };
+    let initial = f.service.app_view(&CallerScope::App).await.unwrap();
+    let on = set(0, true).await.unwrap();
+    let stale = set(0, false).await.unwrap_err();
+    let off = set(1, false).await.unwrap();
+    assert_eq!(
+        (
+            initial.ask_before_password_submit,
+            on.ask_before_password_submit,
+            on.revision,
+            stale,
+            off.ask_before_password_submit,
+            off.revision,
+        ),
+        (false, true, 1, PolicyRefusal::RevisionConflict { current: 1 }, false, 2)
+    );
+    assert!(!f.service.app_policy().await.unwrap().ask_before_password_submit);
+    assert_eq!(f.sink.payloads_of("acp:browser_policy_changed").len(), 2);
 }
 
 #[tokio::test]

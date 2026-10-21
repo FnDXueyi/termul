@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -106,58 +105,6 @@ impl host::PermissionRequest for Approver {
     fn cancel_session(&self, _session_id: &str) {}
 }
 
-/// The policy service, with the app's "ask before an agent submits a
-/// password" setting held here so a case can turn it on for its run.
-struct Policy {
-    service: Arc<host::BrowserPolicyService>,
-    ask_password: AtomicBool,
-}
-
-impl host::PolicyStore for Policy {
-    fn project<'a>(
-        &'a self,
-        project_id: &'a str,
-    ) -> host::PortFuture<'a, Result<host::ProjectPolicy, host::PolicyRefusal>> {
-        host::PolicyStore::project(&*self.service, project_id)
-    }
-
-    fn app(&self) -> host::PortFuture<'_, Result<host::AppPolicy, host::PolicyRefusal>> {
-        host::PolicyStore::app(&*self.service)
-    }
-
-    fn apply_project<'a>(
-        &'a self,
-        project_id: &'a str,
-        expected_revision: u64,
-        op: host::ProjectPolicyOp,
-    ) -> host::PortFuture<'a, Result<host::ProjectPolicy, host::PolicyRefusal>> {
-        host::PolicyStore::apply_project(&*self.service, project_id, expected_revision, op)
-    }
-
-    fn apply_app(
-        &self,
-        expected_revision: u64,
-        op: host::AppPolicyOp,
-    ) -> host::PortFuture<'_, Result<host::AppPolicy, host::PolicyRefusal>> {
-        host::PolicyStore::apply_app(&*self.service, expected_revision, op)
-    }
-
-    fn asks_before_password_submit(&self) -> host::PortFuture<'_, bool> {
-        let ask = self.ask_password.load(Ordering::SeqCst);
-        Box::pin(async move { ask })
-    }
-}
-
-/// The setting turned on until the guard drops, so a failing case never
-/// leaves it on for the next one.
-pub struct AskingForPasswords<'a>(&'a AtomicBool);
-
-impl Drop for AskingForPasswords<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
 /// Which pre-approvals a case writes: the session's project's, or the
 /// app-wide ones global-profile tabs honour.
 #[derive(Debug, Clone, Copy)]
@@ -231,7 +178,6 @@ pub struct Engine {
     input: Arc<dyn host::BrowserEngine>,
     _policy_root: tempfile::TempDir,
     policy: Arc<host::BrowserPolicyService>,
-    store: Arc<Policy>,
     tickets: Arc<Approver>,
     project: Project,
     sessions_root: PathBuf,
@@ -250,10 +196,6 @@ impl Engine {
             Vec::new(),
             Arc::new(host::UnwiredProfileControl),
         ));
-        let store = Arc::new(Policy {
-            service: policy.clone(),
-            ask_password: AtomicBool::new(false),
-        });
         let tickets = Arc::new(Approver::default());
         let project = project();
         let root = project.root.path().to_path_buf();
@@ -263,7 +205,7 @@ impl Engine {
             vec![sink],
             host::HostServices {
                 permissions: tickets.clone(),
-                policy: store.clone(),
+                policy: policy.clone(),
                 // Each case's session is its own project, so the profile
                 // mode and pre-approvals one case sets reach no other.
                 project_of: Arc::new(|session: &str| session.to_string()),
@@ -281,7 +223,6 @@ impl Engine {
             input: host::desktop_engine(tabs),
             _policy_root: policy_root,
             policy,
-            store,
             tickets,
             project,
             sessions_root,
@@ -294,11 +235,14 @@ impl Engine {
         raised.iter().filter(|t| t.session == session).cloned().collect()
     }
 
-    /// Turn on the app's "ask before an agent submits a password" until
-    /// the guard drops.
-    pub fn ask_before_passwords(&self) -> AskingForPasswords<'_> {
-        self.store.ask_password.store(true, Ordering::SeqCst);
-        AskingForPasswords(&self.store.ask_password)
+    /// Set the app's "ask before an agent submits a password" switch.
+    pub async fn ask_before_passwords(&self, ask: bool) -> Result<(), String> {
+        let current = self.policy.app_policy().await.map_err(|e| format!("{e:?}"))?;
+        self.policy
+            .apply_app_op(current.revision, host::AppPolicyOp::SetAskBeforePasswordSubmit(ask))
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Run `session`'s agent tabs on per-session ephemeral profiles.

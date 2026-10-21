@@ -311,10 +311,7 @@ impl ConsentGate {
         // Signing in is the agent's to do unless the user asked to confirm
         // it. A pinned item stands for any credential submit, payments
         // included, so it always asks.
-        if item.class == ActionClass::PasswordSubmit
-            && !item.pinned
-            && !self.policy.asks_before_password_submit().await
-        {
+        if item.class == ActionClass::PasswordSubmit && !item.pinned && !self.asks_before_password_submit().await {
             return Ok(());
         }
         let phrase = class_phrase(item.class);
@@ -401,6 +398,12 @@ impl ConsentGate {
                 format!("the request to {what} was withdrawn"),
             )),
         }
+    }
+
+    /// The app's "ask before an agent submits a password" switch. A policy
+    /// that cannot be read asks.
+    async fn asks_before_password_submit(&self) -> bool {
+        self.policy.app().await.map_or(true, |app| app.ask_before_password_submit)
     }
 
     async fn preapproved(

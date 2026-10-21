@@ -99,8 +99,10 @@ impl Rig {
     }
 
     /// Turn the app's "ask before an agent submits a password" on.
-    fn ask_before_passwords(&self) {
-        self.policy.ask_password.store(true, std::sync::atomic::Ordering::SeqCst);
+    async fn ask_before_passwords(&self) {
+        let revision = self.policy.app().await.unwrap().revision;
+        let op = AppPolicyOp::SetAskBeforePasswordSubmit(true);
+        self.policy.apply_app(revision, op).await.unwrap();
     }
 
     async fn preapprove_app(&self, class: ActionClass) {
@@ -150,7 +152,7 @@ async fn a_password_submit_runs_without_asking_unless_the_app_asks_first() {
 #[tokio::test]
 async fn an_asked_password_submit_prompts_once_or_deny_and_an_unanswered_one_is_refused() {
     let r = rig(vec![]);
-    r.ask_before_passwords();
+    r.ask_before_passwords().await;
     r.open(LOGIN).await;
     r.facts(password_form());
     let reply = r.h.call("click", json!({ "ref": "@e1" })).await;
@@ -189,7 +191,7 @@ async fn check_uncheck_and_select_option_in_a_payment_form_prompt_before_acting(
 async fn an_allowed_password_submit_runs_and_asks_again_next_time() {
     let allow = TicketOutcome::Answered(ConsentOption::AllowSession);
     let r = rig(vec![allow, allow]);
-    r.ask_before_passwords();
+    r.ask_before_passwords().await;
     r.open(LOGIN).await;
     r.facts(password_form());
     assert_eq!(r.h.call("click", json!({ "ref": "@e1" })).await["ok"], true);
@@ -209,7 +211,7 @@ async fn an_allowed_password_submit_runs_and_asks_again_next_time() {
 #[tokio::test]
 async fn global_identity_tabs_ignore_project_pre_approvals_of_submits() {
     let r = rig(vec![]);
-    r.ask_before_passwords();
+    r.ask_before_passwords().await;
     r.open(LOGIN).await;
     assert!(AppPreapproval::new(ActionClass::PaymentSubmit, origin()).is_err());
     for class in [ActionClass::PasswordSubmit, ActionClass::PaymentSubmit] {
@@ -244,7 +246,7 @@ async fn global_identity_tabs_ignore_project_pre_approvals_of_submits() {
 #[tokio::test]
 async fn ephemeral_tabs_honour_project_pre_approvals_and_always_allow_writes_one() {
     let r = rig(vec![TicketOutcome::Answered(ConsentOption::AllowProject)]);
-    r.ask_before_passwords();
+    r.ask_before_passwords().await;
     r.open_ephemeral(LOGIN).await;
     r.facts(password_form());
     assert_eq!(r.h.call("click", json!({ "ref": "@e1" })).await["ok"], true);

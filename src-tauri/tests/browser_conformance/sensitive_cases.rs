@@ -80,6 +80,18 @@ async fn open_on(c: &Ctx<'_>, profile: &str, path: &str, ready: &str) -> CaseRes
     c.call("wait", json!({ "text": ready })).await.map(|_| ())
 }
 
+/// Run `body` with the app asking before password submits, then turn the
+/// switch off whatever `body` returned, so no later case inherits it.
+pub(crate) async fn asking_before_passwords(
+    c: &Ctx<'_>,
+    body: impl std::future::Future<Output = CaseResult>,
+) -> CaseResult {
+    c.engine.ask_before_passwords(true).await.map_err(mismatch)?;
+    let result = body.await;
+    c.engine.ask_before_passwords(false).await.map_err(mismatch)?;
+    result
+}
+
 async fn preapprove(c: &Ctx<'_>, scope: Scope, action: ActionClass) -> CaseResult {
     c.engine
         .preapprove(&c.session, scope, action, &origin(c))
@@ -110,7 +122,10 @@ pub async fn password_submit_global(c: &Ctx<'_>) -> CaseResult {
 /// With the app asking before password submits, one prompts, and a
 /// project pre-approval covers it on an ephemeral tab only.
 pub async fn password_submit_asked(c: &Ctx<'_>) -> CaseResult {
-    let _asking = c.engine.ask_before_passwords();
+    asking_before_passwords(c, asked_password_submit(c)).await
+}
+
+async fn asked_password_submit(c: &Ctx<'_>) -> CaseResult {
     open_on(c, "global", "/password.html", PASSWORD_READY).await?;
     preapprove(c, Scope::Project, ActionClass::PasswordSubmit).await?;
     expect_refusal(
@@ -216,7 +231,10 @@ pub async fn upload_refusals(c: &Ctx<'_>) -> CaseResult {
 /// password form, so it is classified from that button, not the shadow
 /// host the document reports as focused.
 pub async fn focused_password_submit(c: &Ctx<'_>) -> CaseResult {
-    let _asking = c.engine.ask_before_passwords();
+    asking_before_passwords(c, focused_password_submit_asked(c)).await
+}
+
+async fn focused_password_submit_asked(c: &Ctx<'_>) -> CaseResult {
     c.open("/password-shadow.html", SHADOW_PASSWORD_READY).await?;
     expect_refusal(
         c.call("press", json!({ "key": "Enter" })).await,
@@ -232,7 +250,10 @@ pub async fn focused_password_submit(c: &Ctx<'_>) -> CaseResult {
 /// password form like any click. The form also holds a field named
 /// `elements`, which shadows `form.elements` for every script.
 pub async fn check_password_submit(c: &Ctx<'_>) -> CaseResult {
-    let _asking = c.engine.ask_before_passwords();
+    asking_before_passwords(c, check_password_submit_asked(c)).await
+}
+
+async fn check_password_submit_asked(c: &Ctx<'_>) -> CaseResult {
     c.open("/password-switch.html", "Password switch fixture").await?;
     let switch = c.ref_of("switch", "Remember me and sign in").await?;
     expect_refusal(
@@ -248,7 +269,10 @@ pub async fn check_password_submit(c: &Ctx<'_>) -> CaseResult {
 /// A login without a form, submitted by its page script, is a password
 /// submit all the same.
 pub async fn formless_password_submit(c: &Ctx<'_>) -> CaseResult {
-    let _asking = c.engine.ask_before_passwords();
+    asking_before_passwords(c, formless_password_submit_asked(c)).await
+}
+
+async fn formless_password_submit_asked(c: &Ctx<'_>) -> CaseResult {
     c.open("/login-formless.html", "Formless login fixture").await?;
     let sign_in = c.ref_of("button", "Sign in").await?;
     expect_refusal(
