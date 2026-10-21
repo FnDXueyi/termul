@@ -363,7 +363,7 @@ impl Engine {
 
     /// Where the host writes `session`'s downloads.
     pub fn downloads_dir(&self, session: &str) -> PathBuf {
-        self.sessions_root.join(session).join("downloads")
+        host::session_dir(&self.sessions_root, session).join("downloads")
     }
 
     pub fn input(&self) -> &dyn host::BrowserEngine {

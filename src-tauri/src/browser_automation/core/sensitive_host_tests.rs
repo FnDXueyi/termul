@@ -367,7 +367,7 @@ async fn an_upload_stages_the_project_file_and_prompts_unless_app_approved() {
         (on.as_str(), frame.as_deref(), input.as_str()),
         (tab.as_str(), None, "html>body>button:nth-of-type(1)")
     );
-    let staging = r.h.pane.sessions.join("s1").join("staging");
+    let staging = super::super::session_dir(&r.h.pane.sessions, "s1").join("staging");
     assert!(files[0].starts_with(&staging), "{files:?}");
     assert_eq!(std::fs::read(&files[0]).unwrap(), b"%PDF fake");
 }
@@ -482,7 +482,7 @@ async fn downloads_land_host_named_under_the_session_and_are_kept_only_when_conf
         r.h.host
             .download_starting(&tab, &url, suggested)
             .expect("admitted");
-    let downloads = r.h.pane.sessions.join("s1").join("downloads");
+    let downloads = super::super::session_dir(&r.h.pane.sessions, "s1").join("downloads");
     assert_eq!(denied.parent().unwrap(), downloads);
     let name = denied.file_name().unwrap().to_string_lossy().into_owned();
     assert!(name.ends_with(".pdf") && name.len() == 36 + 4, "{name}");

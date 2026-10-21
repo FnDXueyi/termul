@@ -164,7 +164,10 @@ async fn an_opted_out_project_runs_ephemeral_in_its_session_directory_under_app_
     let DataStore::Ephemeral { dir } = p.store_of(&a) else {
         panic!("opted-out tab built on {:?}", p.store_of(&a));
     };
-    assert_eq!(dir, p.h.pane.sessions.join("projAescape").join("profile"));
+    assert_eq!(
+        dir,
+        super::super::session_dir(&p.h.pane.sessions, "projA:../../escape").join("profile")
+    );
     assert!(
         dir.starts_with(&p.h.pane.sessions),
         "never outside the app's session root"

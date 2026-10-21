@@ -11,23 +11,33 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use super::events::label_prefix;
 use super::surface::TabSurface;
 use super::tabs::{BrowserAgentTabEvent, EVENT_AGENT_TAB};
 use super::DesktopBrowserHost;
 use crate::browser_automation::engine::profile::delete_dir;
 
+/// Readable characters of a session id kept in front of its directory's hash.
+const SESSION_DIR_PREFIX: usize = 24;
+
 /// The session's directory under `root`. Session ids are agent-generated:
-/// only `[A-Za-z0-9_-]` survive, so an id can never name another path.
-pub(super) fn session_dir(root: &Path, session_id: &str) -> PathBuf {
-    let safe: String = session_id
+/// the name is a hash of the whole id behind a short prefix of its
+/// `[A-Za-z0-9_-]` characters, so an id never names another path and two
+/// ids never share a directory.
+pub fn session_dir(root: &Path, session_id: &str) -> PathBuf {
+    let prefix: String = session_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(SESSION_DIR_PREFIX)
         .collect();
-    root.join(if safe.is_empty() {
-        "_".to_string()
+    let digest = Sha256::digest(session_id.as_bytes());
+    let hash: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    root.join(if prefix.is_empty() {
+        hash
     } else {
-        safe
+        format!("{prefix}-{hash}")
     })
 }
 

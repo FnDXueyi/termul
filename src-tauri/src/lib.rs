@@ -188,6 +188,7 @@ pub mod conformance_support {
     pub use crate::browser_automation::core::ports::{
         ConsentOption, PermissionRequest, PolicyStore, PortFuture, TicketOutcome, TicketRequest,
     };
+    pub use crate::browser_automation::core::session_dir;
     pub use crate::browser_automation::engine::{
         desktop_engine, BrowserEngine, CapabilityId, EngineError, EngineErrorKind, InputMode, Key, KeyInput,
         KeyKind, NamedKey, Point, Support,

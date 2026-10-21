@@ -44,6 +44,7 @@ pub use reply::{
     ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
 pub use tabs::TabView;
+pub use teardown::session_dir;
 
 use super::budgets::Deadline;
 use super::engine::events::{NavPolicy, NavVerdict, TabEvent, TabEvents, TabRole};
