@@ -42,7 +42,7 @@ function refuse<T>(reason: string, message: string, code = 'invalid_params'): Ip
 }
 
 const RESERVED = /tauri\.localhost|ipc\.localhost|asset\.localhost|0\.0\.0\.0|169\.254\./
-const CREDENTIAL_ACTIONS = new Set(['password_submit', 'payment_submit'])
+const APP_REFUSED_ACTIONS = new Set(['payment_submit'])
 
 function checkOrigin(origin: string | undefined): IpcResult<never> | null {
   if (!origin || !/^https?:\/\/[^\s*]|^https?:\/\/\*\.[^\s*]/.test(origin)) {
@@ -66,6 +66,7 @@ export function createBrowserPolicyHost(): BrowserPolicyHost {
       readOnly: false,
       globalProfileEnabled: true,
       effectiveGlobalProfile: true,
+      askBeforePasswordSubmit: false,
       preapprovals: [],
       clearImpact: { sessions: 0, projects: 0 }
     },
@@ -188,8 +189,12 @@ export function createBrowserPolicyHost(): BrowserPolicyHost {
         changed = host.app.globalProfileEnabled !== op.enabled
         host.app.globalProfileEnabled = op.enabled
         break
+      case 'set_ask_before_password_submit':
+        changed = host.app.askBeforePasswordSubmit !== op.enabled
+        host.app.askBeforePasswordSubmit = op.enabled
+        break
       case 'add_preapproval': {
-        if (CREDENTIAL_ACTIONS.has(op.action)) {
+        if (APP_REFUSED_ACTIONS.has(op.action)) {
           return refuse(
             'preapproval_not_allowed',
             'this action cannot be pre-approved in this scope'

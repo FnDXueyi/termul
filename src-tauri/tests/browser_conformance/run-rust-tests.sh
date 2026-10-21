@@ -17,11 +17,11 @@ esac
 
 if [ "$os" = windows ]; then
   ps="$(command -v pwsh || command -v powershell)"
-  "$ps" -NoProfile -File "$(cygpath -w "$here/build-windows-tests.ps1")" || exit 1
+  "$ps" -NoProfile -File "$(cygpath -w "$here/build-windows-tests.ps1")" --features conformance || exit 1
 fi
 
 log="$(mktemp)"
-cargo test --no-fail-fast 2>&1 | tee "$log"
+cargo test --no-fail-fast --features conformance 2>&1 | tee "$log"
 status="${PIPESTATUS[0]}"
 
 failing="$(mktemp)"

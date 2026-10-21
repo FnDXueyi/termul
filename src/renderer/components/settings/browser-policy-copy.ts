@@ -23,7 +23,7 @@ const REASON_COPY: Partial<Record<NonNullable<BrowserPolicyFailure['reason']>, s
   project_scope_mismatch: 'This device is connected to a different project.',
   revision_conflict: 'The rules kept changing. Reload and try again.',
   policy_read_only:
-    'These rules were saved by a newer version of Termul. You can read them but not change them.',
+    'These rules were saved by a newer version of Termul, or their file is damaged. You can read them but not change them.',
   policy_store_unavailable: "Browser rules aren't available on this host.",
   profile_engine_unavailable: "This build can't clear the agent browser profile yet.",
   profile_clear_failed: 'The agent browser profile could not be cleared. Try again.',
@@ -41,6 +41,7 @@ export function describeFailure(failure: BrowserPolicyFailure): string {
 /** Row ids that settings search jumps to. */
 export const BROWSER_ANCHORS = {
   appProfile: 'setting-browser-shared-profile',
+  appPasswordPrompt: 'setting-browser-password-prompt',
   appPreapprovals: 'setting-browser-app-preapprovals',
   appClear: 'setting-browser-clear-profile',
   projectEphemeral: 'setting-browser-ephemeral',

@@ -178,7 +178,9 @@ pub use acp::claude_admin;
 // Seam for the browser conformance runner (`tests/browser_conformance`), which
 // drives the real automation host from outside the crate. The runner reaches
 // the host only through these names, so a host refactor edits this list and
-// the runner's adapter, nothing else. Not a supported API.
+// the runner's adapter, nothing else. Not a supported API, and absent from
+// every build that does not enable the `conformance` feature.
+#[cfg(feature = "conformance")]
 #[doc(hidden)]
 pub mod conformance_support {
     pub use crate::acp::browser_policy::{
@@ -1411,14 +1413,10 @@ pub fn run() {
                 let db_path = agentation::db_path(&app_data);
                 match tauri::async_runtime::block_on(agentation::AgentationService::start(&db_path)) {
                     Ok(service) => {
-                        let port = service.http_port();
-                        let endpoint = format!("http://127.0.0.1:{port}");
-
-                        // Wire the endpoint into the browser tab manager
                         if let Some(bt_manager) =
                             app.try_state::<Arc<browser_tab_manager::BrowserTabManager>>()
                         {
-                            bt_manager.set_agentation_endpoint(endpoint);
+                            bt_manager.set_agentation_endpoint(service.endpoint().to_string());
                         }
 
                         app.manage(service);
@@ -1642,13 +1640,9 @@ pub fn run() {
             // Host-originated browser consent tickets: answerable from the
             // desktop command or a qualified `/ws` client, raised only while
             // someone is subscribed to the session.
-            let host_tickets = {
-                let relay = Arc::clone(&ws_relay);
-                Arc::new(acp::host_ticket::HostTickets::new(
-                    vec![ws_relay.clone()],
-                    Box::new(move |session_id| relay.session_subscriber_count(session_id) > 0),
-                ))
-            };
+            let host_tickets = Arc::new(acp::host_ticket::HostTickets::for_relay(Arc::clone(
+                &ws_relay,
+            )));
             rendezvous.set_host_tickets(Arc::clone(&host_tickets));
             app.manage(Arc::clone(&host_tickets));
             ws_relay.set_rendezvous(rendezvous);

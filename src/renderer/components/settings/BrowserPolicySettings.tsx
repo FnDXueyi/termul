@@ -27,7 +27,8 @@ function Loading(): React.JSX.Element {
 function ReadOnlyNotice(): React.JSX.Element {
   return (
     <SettingsNotice>
-      These rules were saved by a newer version of Termul. You can read them but not change them.
+      These rules were saved by a newer version of Termul, or their file is damaged. You can read
+      them but not change them.
     </SettingsNotice>
   )
 }
@@ -210,6 +211,17 @@ export function BrowserAppPolicy(): React.JSX.Element {
               void edit({ op: 'set_global_profile', enabled }).then(settle)
             }}
           />
+          <SwitchRow
+            id={BROWSER_ANCHORS.appPasswordPrompt}
+            controlId="browser-password-prompt"
+            label="Ask before an agent submits a password"
+            description="Off: agents sign in to sites without asking you first."
+            checked={policy.askBeforePasswordSubmit}
+            disabled={locked}
+            onToggle={(enabled) => {
+              void edit({ op: 'set_ask_before_password_submit', enabled }).then(settle)
+            }}
+          />
           <SettingsRow
             id={BROWSER_ANCHORS.appClear}
             label="Logins and site data"
@@ -242,7 +254,7 @@ export function BrowserAppPolicy(): React.JSX.Element {
       <PreapprovalEditor
         id={BROWSER_ANCHORS.appPreapprovals}
         label="Pre-approved actions in every project"
-        description="Agents skip the question for these on the shared agent profile. Password and payment forms always ask."
+        description="Agents skip the question for these on the shared agent profile. Payment forms always ask."
         actions={APP_PREAPPROVABLE_ACTIONS}
         entries={policy.preapprovals}
         disabled={locked}

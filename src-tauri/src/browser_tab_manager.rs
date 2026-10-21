@@ -40,6 +40,8 @@ pub struct BrowserTabManager {
     profiles: Result<Arc<AgentProfiles>, String>,
     agentation_endpoint: Arc<Mutex<Option<String>>>,
     agentation_enabled: Arc<Mutex<bool>>,
+    #[cfg(windows)]
+    saved_grants: crate::browser_tab_saved_grants::ClearOnce,
 }
 
 impl BrowserTabManager {
@@ -52,6 +54,8 @@ impl BrowserTabManager {
 
             agentation_endpoint: Arc::new(Mutex::new(None)),
             agentation_enabled: Arc::new(Mutex::new(true)),
+            #[cfg(windows)]
+            saved_grants: crate::browser_tab_saved_grants::ClearOnce::default(),
         }
     }
 
@@ -90,24 +94,34 @@ impl BrowserTabManager {
         crate::host_perimeter::check_tab_target(&self.app_handle, &tab_id, &parsed_url)?;
 
         // User tabs share the app's profile, so clearing through the main
-        // webview wipes saved grants before this tab exists to load a page.
+        // webview resets saved site grants before the first user tab loads a
+        // page. The app UI's own origin keeps its grants.
         #[cfg(windows)]
         if let (DataStore::App, Some(main)) = (&store, self.app_handle.get_webview("main")) {
             use crate::browser_tab_saved_grants::{clear_saved_grants, ClearError};
-            match clear_saved_grants(&main).await {
-                Ok(report) if report.reset > 0 => log::warn!(
+            let app_origin = main
+                .url()
+                .map(|url| url.origin().ascii_serialization())
+                .unwrap_or_default();
+            match self
+                .saved_grants
+                .run(|| clear_saved_grants(&main, app_origin))
+                .await
+            {
+                Some(Ok(report)) if report.reset > 0 => log::warn!(
                     "[BrowserTab] reset {} saved web permission grants before opening tab={}",
                     report.reset,
                     tab_id
                 ),
-                Ok(_) => {}
-                Err(ClearError::Unsupported) => log::warn!(
+                Some(Err(ClearError::Unsupported)) => log::warn!(
                     "[BrowserTab] webview runtime cannot clear saved web permissions; tab={}",
                     tab_id
                 ),
-                Err(ClearError::Failed) => {
-                    return Err("Could not clear saved web permissions".to_string())
-                }
+                Some(Err(ClearError::Failed)) => log::warn!(
+                    "[BrowserTab] could not clear saved web permissions, the next tab retries; tab={}",
+                    tab_id
+                ),
+                Some(Ok(_)) | None => {}
             }
         }
 
@@ -143,11 +157,7 @@ impl BrowserTabManager {
                     "#
                 );
                 builder = builder.initialization_script(&init_script);
-                log::info!(
-                    "[BrowserTab] Agentation init script set for tab={} endpoint={}",
-                    tab_id,
-                    endpoint_url
-                );
+                log::info!("[BrowserTab] Agentation init script set for tab={tab_id}");
             }
         }
 

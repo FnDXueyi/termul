@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::browser_automation::core::ports::{CanonicalOrigin, TicketFile};
-use crate::web::sink::AcpEvent;
+use crate::web::sink::{AcpEvent, WsRelaySink};
 
 #[derive(Default)]
 struct Recorder(Mutex<Vec<(Option<String>, &'static str, Value)>>);
@@ -342,20 +342,15 @@ async fn unknown_options_and_ids_are_rejected() {
     );
 }
 
+/// The relay's subscriptions are the attended signal: a session no client
+/// subscribes to resolves at once and shows nothing, a subscribed client
+/// receives the prompt, and the session is unattended again once it leaves.
 #[tokio::test]
-async fn an_unattended_session_resolves_at_once_without_a_prompt() {
-    let (recorder, tickets) = tickets(Duration::ZERO);
+async fn a_session_without_a_subscribed_client_resolves_at_once_without_a_prompt() {
+    let relay = Arc::new(WsRelaySink::new());
+    relay.seed_session_for_test("s1");
+    let tickets = Arc::new(HostTickets::for_relay(Arc::clone(&relay)).with_answer_floor(Duration::ZERO));
     let started = Instant::now();
-    assert_eq!(
-        tickets
-            .request(
-                ticket("nobody-watching", "https://a.example"),
-                Duration::from_secs(120)
-            )
-            .await,
-        TicketOutcome::Unattended
-    );
-    tickets.set_unattended("s1", true);
     assert_eq!(
         tickets
             .request(ticket("s1", "https://a.example"), Duration::from_secs(120))
@@ -363,8 +358,9 @@ async fn an_unattended_session_resolves_at_once_without_a_prompt() {
         TicketOutcome::Unattended
     );
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert!(recorder.types().is_empty(), "nothing is shown to anyone");
-    tickets.set_unattended("s1", false);
+
+    let closing = tokio_util::sync::CancellationToken::new();
+    let (client, mut stream, _, _) = relay.subscribe("s1", None, None, &closing).await;
     let waiting = tokio::spawn({
         let tickets = tickets.clone();
         async move {
@@ -373,9 +369,31 @@ async fn an_unattended_session_resolves_at_once_without_a_prompt() {
                 .await
         }
     });
-    let id = raised(&tickets, &recorder).await;
+    let shown = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("the subscriber is shown the prompt")
+        .expect("stream open");
+    let shown = format!("{shown:?}");
+    assert!(shown.contains("permission_request"), "{shown}");
+    let id = loop {
+        if let Some(id) = tickets.state.lock().pending.keys().next().cloned() {
+            break id;
+        }
+        tokio::task::yield_now().await;
+    };
     tickets.answer(Approver::Desktop, &id, None).unwrap();
-    waiting.await.unwrap();
+    assert_eq!(
+        waiting.await.unwrap(),
+        TicketOutcome::Answered(ConsentOption::Deny)
+    );
+
+    relay.unsubscribe("s1", client);
+    assert_eq!(
+        tickets
+            .request(ticket("s1", "https://a.example"), Duration::from_secs(120))
+            .await,
+        TicketOutcome::Unattended
+    );
 }
 
 #[tokio::test]

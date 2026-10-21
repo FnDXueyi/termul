@@ -54,15 +54,6 @@ fn hosts_of_allowed_origins_are_served() {
     assert!(!hosts.allows(Some("other.example.com")));
 }
 
-#[test]
-fn a_name_added_later_reaches_every_clone() {
-    let hosts = HostAllowList::loopback();
-    let serving = hosts.clone();
-    assert!(!serving.allows(Some("abc.trycloudflare.com")));
-    hosts.allow("ABC.trycloudflare.com");
-    assert!(serving.allows(Some("abc.trycloudflare.com")));
-}
-
 async fn status_for(host: Option<&str>) -> StatusCode {
     let app = layer(
         axum::Router::new().route("/health", get(|| async { "ok" })),

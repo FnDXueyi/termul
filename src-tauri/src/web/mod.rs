@@ -275,8 +275,7 @@ pub async fn serve(
 /// the desktop shared-live host passes `Some` whenever it advertises a tunnel
 /// or binds beyond loopback (AD-3).
 ///
-/// `host_allow` is the `Host` allow-list the router enforces. The caller
-/// keeps a clone to add names that only exist after start (a tunnel host).
+/// `host_allow` is the `Host` allow-list the router enforces.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_router(
     acp: Arc<AcpManager>,

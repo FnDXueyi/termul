@@ -13,8 +13,12 @@
 //! qualified answer wins; an answer within [`ANSWER_FLOOR`] of the prompt
 //! being shown is refused, so a click aimed at something that just moved
 //! cannot approve it.
+//!
+//! A session nobody is subscribed to has no one who could answer, so its
+//! tickets resolve `Unattended` at once instead of waiting out the consent
+//! window; that is how scripted and scheduled runs fail fast.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +30,7 @@ use crate::browser_automation::core::ports::{
     ActionClass, ConsentOption, PermissionRequest, PortFuture, TabProfile, TicketId, TicketOutcome,
     TicketRequest,
 };
+use crate::web::sink::WsRelaySink;
 use crate::web::EventSink;
 
 pub const ANSWER_FLOOR: Duration = Duration::from_millis(750);
@@ -236,7 +241,6 @@ struct Pending {
 struct State {
     pending: HashMap<String, Pending>,
     resolved: VecDeque<String>,
-    unattended: HashSet<String>,
 }
 
 impl State {
@@ -270,21 +274,21 @@ impl HostTickets {
         }
     }
 
+    /// Tickets fanned out through the relay, raised only while some client
+    /// (the desktop renderer, a phone, a browser) is subscribed to the
+    /// ticket's session.
+    pub fn for_relay(relay: Arc<WsRelaySink>) -> Self {
+        let attached = Arc::clone(&relay);
+        Self::new(
+            vec![relay],
+            Box::new(move |session_id| attached.session_subscriber_count(session_id) > 0),
+        )
+    }
+
     #[cfg(test)]
     pub fn with_answer_floor(mut self, floor: Duration) -> Self {
         self.answer_floor = floor;
         self
-    }
-
-    /// Launcher flag: no one is expected to answer this session's tickets
-    /// (scheduled or scripted runs), so they resolve `Unattended` at once.
-    pub fn set_unattended(&self, session_id: &str, unattended: bool) {
-        let mut state = self.state.lock();
-        if unattended {
-            state.unattended.insert(session_id.to_string());
-        } else {
-            state.unattended.remove(session_id);
-        }
     }
 
     /// The session a pending ticket belongs to.
@@ -388,9 +392,7 @@ impl Drop for Withdraw<'_> {
 impl PermissionRequest for HostTickets {
     fn request(&self, ticket: TicketRequest, wait: Duration) -> PortFuture<'_, TicketOutcome> {
         let session = ticket.session_id.clone();
-        let unattended =
-            self.state.lock().unattended.contains(&session) || !(self.attached)(&session);
-        if unattended {
+        if !(self.attached)(&session) {
             log::info!(
                 "[host-ticket] ticket not raised reason=unattended session={}",
                 crate::logging::redact_session_id(&session)

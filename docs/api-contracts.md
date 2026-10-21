@@ -552,7 +552,7 @@ The relay also sends three frames that are not `acp:*` events. They appear in `W
 
 ### HTTP routes
 
-Each route is behind the web token gate when the host has one (`GATED_PREFIXES` in `src-tauri/src/web/router.rs`).
+Each route is behind the web token gate when the host has one (`GATED_PREFIXES` in `src-tauri/src/web/router/gate.rs`).
 
 <!-- acp-reference:http-routes -->
 | Route | Methods | Mirrors |
