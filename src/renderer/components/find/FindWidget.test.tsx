@@ -57,6 +57,25 @@ describe('FindWidget', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    ['mid composition', { isComposing: true }],
+    ['Safari composition-confirming Enter (keyCode 229)', { keyCode: 229, isComposing: false }]
+  ])('ignores the IME %s', (_, init) => {
+    const replace = {
+      open: true,
+      onOpenChange: vi.fn(),
+      value: 'pin',
+      onValueChange: vi.fn(),
+      onReplace: vi.fn(),
+      onReplaceAll: vi.fn()
+    }
+    const { props } = renderWidget({ replace })
+    fireEvent.keyDown(findField(), { key: 'Enter', ...init })
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Replace' }), { key: 'Enter', ...init })
+    expect(props.onNext).not.toHaveBeenCalled()
+    expect(replace.onReplace).not.toHaveBeenCalled()
+  })
+
   it('toggles options with Alt+C, Alt+W and Alt+R', () => {
     const { props } = renderWidget()
     fireEvent.keyDown(findField(), { key: 'c', code: 'KeyC', altKey: true })

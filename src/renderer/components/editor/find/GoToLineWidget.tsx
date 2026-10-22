@@ -32,7 +32,9 @@ export function GoToLineWidget({
 
   /** Enter jumps (or flags the entry), Escape closes; both ignored mid IME composition. */
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
-    if (event.nativeEvent.isComposing) return
+    // Safari fires compositionend before the confirming keydown, so only the
+    // legacy keyCode 229 marks it.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
     if (event.key === 'Escape') {
       event.preventDefault()
       onClose()

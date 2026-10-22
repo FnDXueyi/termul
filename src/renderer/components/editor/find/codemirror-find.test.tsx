@@ -186,6 +186,15 @@ describe('editor go to line', () => {
     expect(screen.queryByRole('dialog', { name: 'Go to line' })).toBeNull()
     expect(view.hasFocus).toBe(true)
   })
+
+  it('ignores the Safari composition-confirming Enter (keyCode 229)', () => {
+    const view = createEditor('a\nb\nc')
+    press(view, 'g', { ctrlKey: true })
+    fireEvent.change(goToLineField(), { target: { value: '3' } })
+    fireEvent.keyDown(goToLineField(), { key: 'Enter', keyCode: 229, isComposing: false })
+    expect(view.state.selection.main.head).toBe(0)
+    expect(goToLineField()).toBeInTheDocument()
+  })
 })
 
 describe('resolveGoToLine', () => {

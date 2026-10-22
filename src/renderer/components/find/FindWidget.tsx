@@ -231,7 +231,9 @@ export function FindWidget({
 
   /** The owner's keys first (CodeMirror's search-panel keymap), then VS Code's widget keys. */
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.nativeEvent.isComposing) return
+    // A key that confirms an IME composition is not a command. Safari fires
+    // compositionend before that keydown, so only the legacy keyCode 229 marks it.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
     if (onKeyDown?.(event.nativeEvent)) {
       event.preventDefault()
       return
