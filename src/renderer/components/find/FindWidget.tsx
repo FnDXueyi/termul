@@ -93,6 +93,7 @@ const BUTTON_CLASS = cn(
   'size-6 shrink-0 hover:bg-foreground/[0.06] disabled:pointer-events-none disabled:text-disabled-foreground'
 )
 
+/** Count-slot text. Empty while there is no query, so the slot keeps its width without noise. */
 function statusLabel(status: FindStatus): string {
   if (status.kind === 'empty') return ''
   if (status.kind === 'invalid') return 'Invalid regex'
@@ -117,6 +118,7 @@ function useFieldValue(value: string): [string, (next: string) => void] {
   return [draft, setDraft]
 }
 
+/** Quiet 24px icon button whose tooltip names the action and its shortcut. */
 function WidgetButton({
   icon: Icon,
   label,
@@ -156,6 +158,10 @@ function WidgetButton({
   )
 }
 
+/**
+ * On/off search option inside the find field. Pressed is the foreground wash,
+ * not a keycap, because it sits on a popover (docs/design/colors.md).
+ */
 function OptionToggle({
   icon: Icon,
   label,
@@ -223,6 +229,7 @@ export function FindWidget({
   const hasMatches = status.kind === 'matches' && status.total > 0
   const label = statusLabel(status)
 
+  /** The owner's keys first (CodeMirror's search-panel keymap), then VS Code's widget keys. */
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (event.nativeEvent.isComposing) return
     if (onKeyDown?.(event.nativeEvent)) {

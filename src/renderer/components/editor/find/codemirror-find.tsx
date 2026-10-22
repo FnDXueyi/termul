@@ -131,6 +131,7 @@ const replaceOpenField = StateField.define<boolean>({
   }
 })
 
+/** Focus a find field with its text selected, so typing replaces it (VS Code's Ctrl+F / Ctrl+H). */
 function focusField(root: ParentNode, field: 'search' | 'replace'): void {
   const input = root.querySelector<HTMLInputElement>(`[data-find-field="${field}"]`)
   input?.focus()
@@ -168,12 +169,14 @@ abstract class ReactPanel implements Panel {
   private readonly root: Root
   private readonly context: string
 
+  /** `context` names the panel in ErrorBoundary logs. */
   constructor(view: EditorView, context: string) {
     this.view = view
     this.context = context
     this.root = createRoot(this.dom)
   }
 
+  /** The widget to draw, read fresh from the editor state on every render. */
   protected abstract content(): ReactNode
 
   /**
@@ -192,28 +195,38 @@ abstract class ReactPanel implements Panel {
     else this.root.render(tree)
   }
 
+  /**
+   * Unmounts on a microtask: editors are destroyed in React effect cleanup,
+   * where unmounting another root synchronously warns.
+   */
   destroy(): void {
-    // Editors are destroyed in React effect cleanup, where unmounting another
-    // root synchronously warns.
     const { root } = this
     queueMicrotask(() => root.unmount())
   }
 }
 
+/** CodeMirror's search panel, replaced by {@link FindWidget} through `search({ createPanel })`. */
 class FindPanel extends ReactPanel {
   private query: SearchQuery
   private matches: { doc: Text; query: SearchQuery; list: MatchList } | null = null
 
+  /** Starts from the query CodeMirror already holds, seeded from the selection on Ctrl+F. */
   constructor(view: EditorView) {
     super(view, 'Editor find')
     this.query = getSearchQuery(view.state)
     this.render(true)
   }
 
+  /** CodeMirror calls this once the panel is in the DOM: focus the field like VS Code. */
   mount(): void {
     focusField(this.dom, 'search')
   }
 
+  /**
+   * Re-render when the count or the fields can change: text, selection, an
+   * outside query or the replace row. Opening replace renders synchronously so
+   * {@link openReplacePanel} can focus the new field right away.
+   */
   update(update: ViewUpdate): void {
     let changed = update.docChanged || update.selectionSet
     let sync = false
@@ -233,6 +246,7 @@ class FindPanel extends ReactPanel {
     if (changed) this.render(sync)
   }
 
+  /** The find widget, pinned to the top right, without replace in read-only editors. */
   protected content(): ReactNode {
     const { view, query } = this
     const { state } = view
@@ -268,6 +282,10 @@ class FindPanel extends ReactPanel {
     )
   }
 
+  /**
+   * Push a field or option change into CodeMirror's query. `this.query` is set
+   * before dispatching so {@link update} recognises the effect as its own.
+   */
   private commit(change: Partial<FindOptions> & { search?: string; replace?: string }): void {
     const previous = this.query
     const next = new SearchQuery({
@@ -299,6 +317,7 @@ class FindPanel extends ReactPanel {
     })
   }
 
+  /** What the count slot shows. Invalid regexes are caught here: their cursor would throw. */
   private status(): FindStatus {
     const { state } = this.view
     const { query } = this
@@ -315,6 +334,7 @@ class FindPanel extends ReactPanel {
     return { kind: 'matches', current: matchIndex(ranges, from, to), total: ranges.length, capped }
   }
 
+  /** Show or hide the replace row. Hiding it while it has focus moves focus to the find field, not the page. */
   private setReplaceOpen(open: boolean): void {
     const focused = this.view.root.activeElement
     const replaceFocused = focused?.getAttribute('data-find-field') === 'replace'
@@ -322,6 +342,7 @@ class FindPanel extends ReactPanel {
     if (!open && replaceFocused) focusField(this.dom, 'search')
   }
 
+  /** Replace every match as one undo step. Logs the count only: the query may hold secrets. */
   private replaceAllMatches(): void {
     const status = this.status()
     if (!replaceAll(this.view) || status.kind !== 'matches') return
@@ -335,28 +356,34 @@ class FindPanel extends ReactPanel {
 
 const setGoToLineOpen = StateEffect.define<boolean>()
 
+/** The Ctrl+G panel: {@link GoToLineWidget} at the top centre of the editor. */
 class GoToLinePanel extends ReactPanel {
   /** Blur also asks to close, sometimes during the closing update itself. */
   private closed = false
 
+  /** Renders synchronously so {@link mount} finds the field. */
   constructor(view: EditorView) {
     super(view, 'Editor go to line')
     this.render(true)
   }
 
+  /** Focus the field as soon as CodeMirror has inserted the panel. */
   mount(): void {
     this.dom.querySelector<HTMLInputElement>('[data-go-to-line]')?.focus()
   }
 
+  /** Keep the "Line N of M" hint current. */
   update(update: ViewUpdate): void {
     if (update.docChanged || update.selectionSet) this.render()
   }
 
+  /** A blur fired by the panel's removal must not dispatch into a destroyed editor. */
   destroy(): void {
     this.closed = true
     super.destroy()
   }
 
+  /** The go-to-line field, centred over the top of the editor. */
   protected content(): ReactNode {
     const { state } = this.view
     return (
@@ -371,6 +398,10 @@ class GoToLinePanel extends ReactPanel {
     )
   }
 
+  /**
+   * Jump to the entry and close. Returns false for an entry that is not a
+   * line, so the widget can say so and stay open.
+   */
   private go(value: string): boolean {
     const position = resolveGoToLine(this.view.state, value)
     if (position === null) return false
@@ -384,6 +415,7 @@ class GoToLinePanel extends ReactPanel {
     return true
   }
 
+  /** Close once. Escape hands focus back to the editor; a blur leaves it where the user put it. */
   private close(focusEditor: boolean): void {
     if (this.closed) return
     this.closed = true
@@ -392,8 +424,10 @@ class GoToLinePanel extends ReactPanel {
   }
 }
 
+/** One stable constructor: showPanel keeps a panel only while its constructor stays the same. */
 const createGoToLinePanel = (view: EditorView): Panel => new GoToLinePanel(view)
 
+/** Whether the go-to-line panel is open; provides the panel through showPanel. */
 const goToLineField = StateField.define<boolean>({
   create: () => false,
   update(open, tr) {

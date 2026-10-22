@@ -67,6 +67,7 @@ describe('useCodeMirror Mod-s', () => {
 })
 
 describe('useCodeMirror find', () => {
+  /** Ctrl+key with the editor focused, inside act because the find panels render React. */
   function pressCtrl(view: NonNullable<ReturnType<typeof useCodeMirror>['view']>, key: string) {
     const event = new KeyboardEvent('keydown', { key, ctrlKey: true })
     let handled = false

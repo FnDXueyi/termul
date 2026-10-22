@@ -18,6 +18,7 @@ import {
 
 const editors: Array<{ view: EditorView; parent: HTMLElement }> = []
 
+/** A real EditorView attached to the document, as focus and panel mounting need. */
 function createEditor(doc: string, readOnly = false): EditorView {
   const parent = document.createElement('div')
   document.body.appendChild(parent)
@@ -41,11 +42,13 @@ function press(view: EditorView, key: string, init: KeyboardEventInit = {}): boo
   return handled
 }
 
+/** Ctrl+F in the editor, then optionally type a query into the find field. */
 function openFind(view: EditorView, query?: string): void {
   press(view, 'f', { ctrlKey: true })
   if (query !== undefined) fireEvent.change(findField(), { target: { value: query } })
 }
 
+/** The widget's fields, looked up fresh because the panel re-renders. */
 const findField = () => screen.getByRole('textbox', { name: 'Find' })
 const replaceField = () => screen.getByRole('textbox', { name: 'Replace' })
 

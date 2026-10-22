@@ -6,6 +6,7 @@ import { FindWidget } from './FindWidget'
 
 type Props = ComponentProps<typeof FindWidget>
 
+/** Renders the widget inside the TooltipProvider the app root supplies, with spy handlers. */
 function renderWidget(overrides: Partial<Props> = {}) {
   const props: Props = {
     search: 'needle',

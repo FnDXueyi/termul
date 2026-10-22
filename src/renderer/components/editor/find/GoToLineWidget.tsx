@@ -30,6 +30,7 @@ export function GoToLineWidget({
   const [value, setValue] = useState('')
   const [invalid, setInvalid] = useState(false)
 
+  /** Enter jumps (or flags the entry), Escape closes; both ignored mid IME composition. */
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
     if (event.nativeEvent.isComposing) return
     if (event.key === 'Escape') {
@@ -41,6 +42,7 @@ export function GoToLineWidget({
     }
   }
 
+  /** Close like VS Code's quick input once focus leaves the widget, not when it moves inside it. */
   const handleBlur = (event: FocusEvent<HTMLDivElement>): void => {
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) onDismiss()
   }
